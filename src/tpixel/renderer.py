@@ -113,6 +113,7 @@ def to_patchwork(panel: Panel, label: str = "tpixel") -> "pw.Brick":
     Returns:
         A ``patchworklib.Brick`` ready for composition.
     """
+    matplotlib.use("Agg")
     import patchworklib as pw
 
     w, h = panel_figsize(panel)

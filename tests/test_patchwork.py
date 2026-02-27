@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import matplotlib.pyplot as plt
-import patchworklib as pw
+import matplotlib
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
+import patchworklib as pw  # noqa: E402
 
 from tpixel.models import Marker, Panel, Region, SeqGroup
 from tpixel.renderer import panel_figsize, plot_panel, to_patchwork
