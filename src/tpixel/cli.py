@@ -46,9 +46,11 @@ def _auto_detect_hiv(fasta_path: str) -> bool:
 
 @click.command(
     context_settings={"help_option_names": ["-h", "--help"]},
-    epilog="Use '-' to read file paths from stdin, e.g.:\n\n"
-    "  find . -name '*.fasta' | tpixel --fasta - -o out.png",
+    epilog="Positional args and --fasta are combined. Use '-' for stdin:\n\n"
+    "  tpixel alignment.fasta -o out.png\n"
+    "  find . -name '*.fasta' | tpixel - -o out.png",
 )
+@click.argument("fasta_args", nargs=-1)
 @click.option(
     "--fasta",
     multiple=True,
@@ -92,7 +94,7 @@ def _auto_detect_hiv(fasta_path: str) -> bool:
     default=None,
     help="Title displayed above the plot.",
 )
-def main(fasta, columns, output, dpi, cell, hiv, nt, ref_pos, title):
+def main(fasta_args, fasta, columns, output, dpi, cell, hiv, nt, ref_pos, title):
     """Pixel-block alignment viewer for hundreds of sequences.
 
     Renders Roark-style PIXEL plots: grey=match, red=substitution, black=gap.
@@ -101,10 +103,10 @@ def main(fasta, columns, output, dpi, cell, hiv, nt, ref_pos, title):
     HIV mode is auto-detected when the alignment contains HxB2 and a *_ref
     sequence. Force with --hiv or --no-hiv.
     """
-    fasta_paths = _expand_stdin(list(fasta))
+    fasta_paths = _expand_stdin(list(fasta_args) + list(fasta))
 
     if not fasta_paths:
-        raise click.UsageError("Provide --fasta")
+        raise click.UsageError("Provide at least one FASTA file")
 
     ref_positions = [int(x) for x in ref_pos.split(",")]
 

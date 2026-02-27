@@ -18,6 +18,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 from matplotlib.patches import Rectangle
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -38,6 +39,86 @@ REF_ROW_HEIGHT = 0.5
 REF_SEQ_PAD = 0.3
 SEQ_DATA_ROW = 0.35
 GROUP_DATA_GAP = 1.0
+
+
+def panel_figsize(panel: Panel) -> tuple[float, float]:
+    """Calculate the recommended figure size for a panel in inches.
+
+    Args:
+        panel: Panel object to calculate size for.
+
+    Returns:
+        Tuple of (width, height) in inches.
+    """
+    aln_len = panel.total_cols
+    total_seqs = panel.total_seqs
+    n_groups = len(panel.effective_groups)
+
+    has_regions = bool(panel.regions)
+    has_markers = bool(panel.markers)
+    has_title = bool(panel.title)
+
+    fig_width = max(6, aln_len / 100 + 2)
+
+    title_h = 0.5 if has_title else 0.0
+    region_h = 0.4 if has_regions else 0.0
+    marker_h = 0.6 if has_markers else 0.0
+    ref_h = 0.15
+    axis_h = 0.5
+    legend_h = 0.4
+
+    seq_row_h = 0.02
+    group_gap_h = 0.06
+    seq_zone_h = total_seqs * seq_row_h + max(0, n_groups - 1) * group_gap_h
+
+    total_h = max(
+        3.0,
+        title_h + region_h + marker_h + ref_h + axis_h + legend_h + seq_zone_h,
+    )
+
+    return fig_width, total_h
+
+
+def plot_panel(panel: Panel, ax: Axes | None = None) -> Axes:
+    """Render a single panel onto a matplotlib Axes.
+
+    If *ax* is ``None`` a new figure is created with dimensions from
+    :func:`panel_figsize`.  Works with any ``matplotlib.axes.Axes``
+    subclass, including ``patchworklib.Brick``.
+
+    Args:
+        panel: Panel object to render.
+        ax: Optional matplotlib Axes (or patchworklib Brick) to draw on.
+            When ``None``, a new figure and axes are created.
+
+    Returns:
+        The Axes that was drawn on.
+    """
+    if ax is None:
+        w, h = panel_figsize(panel)
+        _fig, ax = plt.subplots(1, 1, figsize=(w, h))
+
+    _draw_panel(panel, ax)
+    return ax
+
+
+def to_patchwork(panel: Panel, label: str = "tpixel") -> "pw.Brick":
+    """Create a patchworklib Brick containing the rendered panel.
+
+    Args:
+        panel: Panel object to render.
+        label: Unique label for the Brick (must differ between Bricks
+            when composing with ``|`` or ``/``).
+
+    Returns:
+        A ``patchworklib.Brick`` ready for composition.
+    """
+    import patchworklib as pw
+
+    w, h = panel_figsize(panel)
+    brick = pw.Brick(figsize=(w, h), label=label)
+    _draw_panel(panel, brick)
+    return brick
 
 
 def render_panels(
@@ -74,6 +155,29 @@ def render_panels(
 
 def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
     """Render one panel to a file, using the 7-layer Roark layout."""
+    ax = plot_panel(panel)
+    fig = ax.figure
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    suffix = out_path.suffix.lower()
+    if suffix == ".pdf":
+        with PdfPages(str(out_path)) as pdf:
+            pdf.savefig(fig, bbox_inches="tight", dpi=dpi)
+    else:
+        fig.savefig(
+            out_path,
+            dpi=dpi,
+            bbox_inches="tight",
+            pad_inches=0.05,
+            facecolor="white",
+            transparent=False,
+        )
+    plt.close(fig)
+
+
+def _draw_panel(panel: Panel, ax: Axes) -> None:
+    """Draw all 7 layers of a Roark-style panel onto *ax*."""
     aln_len = panel.total_cols
     groups = panel.effective_groups
     total_seqs = panel.total_seqs
@@ -83,31 +187,8 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
     has_markers = bool(panel.markers)
     has_title = bool(panel.title)
 
-    # -- Figure sizing -------------------------------------------------------
-    fig_width = max(6, aln_len / 100 + 2)
-
-    # Fixed zones (inches)
-    title_h = 0.5 if has_title else 0.0
-    region_h = 0.4 if has_regions else 0.0
-    marker_h = 0.6 if has_markers else 0.0
-    ref_h = 0.15
-    axis_h = 0.5
-    legend_h = 0.4
-
-    seq_row_h = 0.02
-    group_gap_h = 0.06
-    seq_zone_h = total_seqs * seq_row_h + max(0, n_groups - 1) * group_gap_h
-
-    total_h = max(3.0, title_h + region_h + marker_h + ref_h + axis_h + legend_h + seq_zone_h)
-
-    fig, ax = plt.subplots(1, 1, figsize=(fig_width, total_h))
-
     # -- Y coordinate system (data units, top=0 downward) --------------------
     y_cursor = 0.0
-
-    # Title zone
-    y_title = -0.3 if has_title else None
-    # (title drawn at negative y since we start regions at 0)
 
     # Marker zone (ABOVE region header so labels are readable)
     if has_markers:
@@ -139,7 +220,9 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
     y_cursor += REF_SEQ_PAD
     y_seq_start = y_cursor
 
-    seq_data_total = total_seqs * SEQ_DATA_ROW + max(0, n_groups - 1) * GROUP_DATA_GAP
+    seq_data_total = (
+        total_seqs * SEQ_DATA_ROW + max(0, n_groups - 1) * GROUP_DATA_GAP
+    )
 
     y_axis_pos = y_seq_start + seq_data_total + 0.5
     y_max = y_axis_pos + 2.0
@@ -151,27 +234,40 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
     # -- Layer 1: Title -------------------------------------------------------
     if has_title:
         ax.text(
-            aln_len / 2, -0.3,
+            aln_len / 2,
+            -0.3,
             panel.title,
-            fontsize=8, ha="center", va="bottom",
-            fontweight="bold", color="#212121",
+            fontsize=8,
+            ha="center",
+            va="bottom",
+            fontweight="bold",
+            color="#212121",
         )
 
     # -- Layer 2: Region header -----------------------------------------------
     if has_regions:
         for region in panel.regions:
             width = region.end - region.start
-            ax.add_patch(Rectangle(
-                (region.start, y_region_top), width, y_region_bot - y_region_top,
-                facecolor=region.color, edgecolor="#9E9E9E", linewidth=0.3,
-            ))
+            ax.add_patch(
+                Rectangle(
+                    (region.start, y_region_top),
+                    width,
+                    y_region_bot - y_region_top,
+                    facecolor=region.color,
+                    edgecolor="#9E9E9E",
+                    linewidth=0.3,
+                )
+            )
             if width > aln_len * 0.015:
                 ax.text(
                     region.start + width / 2,
                     (y_region_top + y_region_bot) / 2,
                     region.name,
-                    fontsize=5, ha="center", va="center",
-                    fontweight="bold", color="#424242",
+                    fontsize=5,
+                    ha="center",
+                    va="center",
+                    fontweight="bold",
+                    color="#424242",
                 )
 
     # -- Layer 3: Marker annotation row (above region header) -----------------
@@ -186,14 +282,20 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
             ax.plot(
                 [col + 0.5, col + 0.5],
                 [y_dot_row, y_seq_start + seq_data_total],
-                color=panel.marker_color, linewidth=0.3, linestyle=":",
-                alpha=0.4, zorder=0,
+                color=panel.marker_color,
+                linewidth=0.3,
+                linestyle=":",
+                alpha=0.4,
+                zorder=0,
             )
             # Green dot
             ax.plot(
-                col + 0.5, y_dot_row,
-                marker="o", markersize=2.5,
-                color=panel.marker_color, markeredgecolor=panel.marker_color,
+                col + 0.5,
+                y_dot_row,
+                marker="o",
+                markersize=2.5,
+                color=panel.marker_color,
+                markeredgecolor=panel.marker_color,
                 zorder=3,
             )
             # Horizontal label, alternating above/below dot
@@ -204,10 +306,15 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
                 y_text = y_label_below
                 va = "top"
             ax.text(
-                col + 0.5, y_text,
+                col + 0.5,
+                y_text,
                 marker.label,
-                fontsize=2.5, ha="center", va=va,
-                rotation=0, color=panel.marker_color, fontweight="bold",
+                fontsize=2.5,
+                ha="center",
+                va=va,
+                rotation=0,
+                color=panel.marker_color,
+                fontweight="bold",
                 clip_on=True,
             )
 
@@ -217,39 +324,69 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
         y_eref = y_extra_ref_top
         for eref_label, eref_row in panel.extra_ref_rows:
             eref_bot = y_eref + REF_ROW_HEIGHT
-            ax.add_patch(Rectangle(
-                (0, y_eref), aln_len, eref_bot - y_eref,
-                facecolor=REF_COLOR, edgecolor="none",
-            ))
+            ax.add_patch(
+                Rectangle(
+                    (0, y_eref),
+                    aln_len,
+                    eref_bot - y_eref,
+                    facecolor=REF_COLOR,
+                    edgecolor="none",
+                )
+            )
             for i, base in enumerate(eref_row):
                 if base == "-":
-                    ax.add_patch(Rectangle(
-                        (i, y_eref), 1, eref_bot - y_eref,
-                        facecolor="white", edgecolor="none",
-                    ))
+                    ax.add_patch(
+                        Rectangle(
+                            (i, y_eref),
+                            1,
+                            eref_bot - y_eref,
+                            facecolor="white",
+                            edgecolor="none",
+                        )
+                    )
             ax.text(
-                -aln_len * 0.005, (y_eref + eref_bot) / 2,
-                eref_label, fontsize=5, ha="right", va="center",
-                fontweight="bold", color="#212121",
+                -aln_len * 0.005,
+                (y_eref + eref_bot) / 2,
+                eref_label,
+                fontsize=5,
+                ha="right",
+                va="center",
+                fontweight="bold",
+                color="#212121",
             )
             y_eref = eref_bot
 
     # Primary reference row (comparison base for sample sequences)
-    ax.add_patch(Rectangle(
-        (0, y_ref_top), aln_len, y_ref_bot - y_ref_top,
-        facecolor=REF_COLOR, edgecolor="none",
-    ))
+    ax.add_patch(
+        Rectangle(
+            (0, y_ref_top),
+            aln_len,
+            y_ref_bot - y_ref_top,
+            facecolor=REF_COLOR,
+            edgecolor="none",
+        )
+    )
     for i, base in enumerate(panel.ref_row):
         if base == "-":
-            ax.add_patch(Rectangle(
-                (i, y_ref_top), 1, y_ref_bot - y_ref_top,
-                facecolor="white", edgecolor="none",
-            ))
+            ax.add_patch(
+                Rectangle(
+                    (i, y_ref_top),
+                    1,
+                    y_ref_bot - y_ref_top,
+                    facecolor="white",
+                    edgecolor="none",
+                )
+            )
 
     ax.text(
-        -aln_len * 0.005, (y_ref_top + y_ref_bot) / 2,
-        panel.label, fontsize=5, ha="right", va="center",
-        fontweight="bold", color="#212121",
+        -aln_len * 0.005,
+        (y_ref_top + y_ref_bot) / 2,
+        panel.label,
+        fontsize=5,
+        ha="right",
+        va="center",
+        fontweight="bold",
+        color="#212121",
     )
 
     # -- Layer 5: Sequence group blocks ----------------------------------------
@@ -263,10 +400,15 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
             row_y = y_cursor
 
             # Grey background for entire row
-            ax.add_patch(Rectangle(
-                (0, row_y), aln_len, SEQ_DATA_ROW * 0.85,
-                facecolor=MATCH_COLOR, edgecolor="none",
-            ))
+            ax.add_patch(
+                Rectangle(
+                    (0, row_y),
+                    aln_len,
+                    SEQ_DATA_ROW * 0.85,
+                    facecolor=MATCH_COLOR,
+                    edgecolor="none",
+                )
+            )
 
             # Overdraw mutations and gaps
             for i, base in enumerate(row):
@@ -279,10 +421,15 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
                     continue
                 else:
                     color = MISMATCH_COLOR
-                ax.add_patch(Rectangle(
-                    (i, row_y), 1, SEQ_DATA_ROW * 0.85,
-                    facecolor=color, edgecolor="none",
-                ))
+                ax.add_patch(
+                    Rectangle(
+                        (i, row_y),
+                        1,
+                        SEQ_DATA_ROW * 0.85,
+                        facecolor=color,
+                        edgecolor="none",
+                    )
+                )
 
             y_cursor += SEQ_DATA_ROW
 
@@ -296,8 +443,12 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
     for y_center, name, count in label_positions:
         label = f"{name} ({count})"
         ax.text(
-            -aln_len * 0.005, y_center,
-            label, fontsize=4, ha="right", va="center",
+            -aln_len * 0.005,
+            y_center,
+            label,
+            fontsize=4,
+            ha="right",
+            va="center",
             color="#424242",
         )
 
@@ -306,12 +457,17 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
         ax.plot(
             [col_idx + 0.5, col_idx + 0.5],
             [y_axis_pos - 0.2, y_axis_pos + 0.1],
-            color="#424242", linewidth=0.5,
+            color="#424242",
+            linewidth=0.5,
         )
         ax.text(
-            col_idx + 0.5, y_axis_pos + 0.2,
+            col_idx + 0.5,
+            y_axis_pos + 0.2,
             label,
-            fontsize=4, ha="center", va="top", color="#424242",
+            fontsize=4,
+            ha="center",
+            va="top",
+            color="#424242",
         )
 
     # -- Layer 7: Legend -------------------------------------------------------
@@ -329,13 +485,24 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
 
     for idx, (label, color) in enumerate(legend_items):
         x = legend_x_start + idx * legend_spacing
-        ax.add_patch(Rectangle(
-            (x, legend_y), aln_len * 0.015, 0.4,
-            facecolor=color, edgecolor="#9E9E9E", linewidth=0.3,
-        ))
+        ax.add_patch(
+            Rectangle(
+                (x, legend_y),
+                aln_len * 0.015,
+                0.4,
+                facecolor=color,
+                edgecolor="#9E9E9E",
+                linewidth=0.3,
+            )
+        )
         ax.text(
-            x + aln_len * 0.02, legend_y + 0.2,
-            label, fontsize=5, ha="left", va="center", color="#424242",
+            x + aln_len * 0.02,
+            legend_y + 0.2,
+            label,
+            fontsize=5,
+            ha="left",
+            va="center",
+            color="#424242",
         )
 
     # Stats summary on the right side of the legend
@@ -345,24 +512,11 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
         f"{aln_len} positions, {panel.seq_type}"
     )
     ax.text(
-        aln_len * 1.0, legend_y + 0.2,
-        stats, fontsize=5, ha="right", va="center", color="#757575",
+        aln_len * 1.0,
+        legend_y + 0.2,
+        stats,
+        fontsize=5,
+        ha="right",
+        va="center",
+        color="#757575",
     )
-
-    # -- Save ------------------------------------------------------------------
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
-    suffix = out_path.suffix.lower()
-    if suffix == ".pdf":
-        with PdfPages(str(out_path)) as pdf:
-            pdf.savefig(fig, bbox_inches="tight", dpi=dpi)
-    else:
-        plt.savefig(
-            out_path,
-            dpi=dpi,
-            bbox_inches="tight",
-            pad_inches=0.05,
-            facecolor="white",
-            transparent=False,
-        )
-    plt.close(fig)
