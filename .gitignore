@@ -211,3 +211,10 @@ __marimo__/
 
 # Test output artifacts
 tests/output/
+
+# Ad-hoc alignment and image files
+top_env_protein_aligned.fasta
+mid_env_protein_aligned.fasta
+bot_env_protein_aligned.fasta
+combined.png
+tpixel.skill
