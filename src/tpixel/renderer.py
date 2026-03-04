@@ -41,6 +41,45 @@ SEQ_DATA_ROW = 0.35
 GROUP_DATA_GAP = 1.0
 
 
+def _data_height(panel: Panel, *, show_footer: bool = True) -> float:
+    """Compute total data-coordinate height matching ``_draw_panel`` layout.
+
+    This mirrors the y-coordinate system in :func:`_draw_panel` so that
+    callers can derive a consistent inches-per-data-unit scale.
+
+    Args:
+        panel: Panel to measure.
+        show_footer: Whether the legend row is included.  When ``False``
+            only the x-axis ticks are counted, saving ~1.2 data units.
+    """
+    has_regions = bool(panel.regions)
+    has_markers = bool(panel.markers)
+    has_title = bool(panel.title)
+    n_extra_refs = len(panel.extra_ref_rows) if panel.extra_ref_rows else 0
+    total_seqs = panel.total_seqs
+    n_groups = len(panel.effective_groups)
+
+    y = 0.0
+    if has_markers:
+        y += MARKER_ZONE_HEIGHT + HEADER_MARKER_PAD
+    if has_regions:
+        y += REGION_HEADER_HEIGHT
+    y += MARKER_REF_PAD if (has_markers or has_regions) else 0.2
+    if n_extra_refs:
+        y += n_extra_refs * REF_ROW_HEIGHT + REF_SEQ_PAD
+    y += REF_ROW_HEIGHT + REF_SEQ_PAD  # primary ref
+
+    seq_data_total = total_seqs * SEQ_DATA_ROW + max(0, n_groups - 1) * GROUP_DATA_GAP
+    # 0.5 gap before axis; 2.0 for legend or 0.8 for axis labels only
+    y += seq_data_total + 0.5 + (2.0 if show_footer else 0.8)
+
+    # Account for title headroom in ylim
+    if has_title:
+        y += 0.4
+
+    return y
+
+
 def panel_figsize(panel: Panel) -> tuple[float, float]:
     """Calculate the recommended figure size for a panel in inches.
 
@@ -53,6 +92,7 @@ def panel_figsize(panel: Panel) -> tuple[float, float]:
     aln_len = panel.total_cols
     total_seqs = panel.total_seqs
     n_groups = len(panel.effective_groups)
+    n_extra_refs = len(panel.extra_ref_rows) if panel.extra_ref_rows else 0
 
     has_regions = bool(panel.regions)
     has_markers = bool(panel.markers)
@@ -63,7 +103,7 @@ def panel_figsize(panel: Panel) -> tuple[float, float]:
     title_h = 0.5 if has_title else 0.0
     region_h = 0.4 if has_regions else 0.0
     marker_h = 0.6 if has_markers else 0.0
-    ref_h = 0.15
+    ref_h = 0.15 * (1 + n_extra_refs)
     axis_h = 0.5
     legend_h = 0.4
 
@@ -102,13 +142,22 @@ def plot_panel(panel: Panel, ax: Axes | None = None) -> Axes:
     return ax
 
 
-def to_patchwork(panel: Panel, label: str = "tpixel") -> "pw.Brick":
+def to_patchwork(
+    panel: Panel,
+    label: str = "tpixel",
+    figsize: tuple[float, float] | None = None,
+    show_footer: bool = True,
+) -> "pw.Brick":
     """Create a patchworklib Brick containing the rendered panel.
 
     Args:
         panel: Panel object to render.
         label: Unique label for the Brick (must differ between Bricks
             when composing with ``|`` or ``/``).
+        figsize: Override ``(width, height)`` in inches.  When ``None``,
+            uses :func:`panel_figsize`.
+        show_footer: Draw the legend row.  Set ``False`` on stacked panels
+            to show the legend only once on the last panel.
 
     Returns:
         A ``patchworklib.Brick`` ready for composition.
@@ -116,9 +165,10 @@ def to_patchwork(panel: Panel, label: str = "tpixel") -> "pw.Brick":
     matplotlib.use("Agg")
     import patchworklib as pw
 
-    w, h = panel_figsize(panel)
-    brick = pw.Brick(figsize=(w, h), label=label)
-    _draw_panel(panel, brick)
+    if figsize is None:
+        figsize = panel_figsize(panel)
+    brick = pw.Brick(figsize=figsize, label=label)
+    _draw_panel(panel, brick, show_footer=show_footer)
     return brick
 
 
@@ -134,6 +184,9 @@ def render_panels(
     markers, and grouped sequences. Falls back to a simpler view
     for basic panels with only ref_row + seq_rows.
 
+    When multiple panels are provided they are vertically stacked using
+    patchworklib so proportions are preserved automatically.
+
     Args:
         panels: List of Panel objects to render vertically.
         out_path: Output image path (format inferred from extension).
@@ -142,16 +195,50 @@ def render_panels(
     """
     out_path = Path(out_path)
 
-    for panel in panels:
-        _render_single_panel(panel, out_path, dpi)
-
-    if len(panels) > 1:
-        print(f"Saved: {out_path} ({dpi} dpi, {len(panels)} panel(s))")
-    else:
+    if len(panels) == 1:
+        _render_single_panel(panels[0], out_path, dpi)
         print(
             f"Saved: {out_path} ({dpi} dpi, {panels[0].total_cols} cols, "
             f"{panels[0].total_seqs} seqs)"
         )
+        return
+
+    # Multiple panels: stack vertically with patchworklib.
+    # Only the last panel gets the legend; earlier panels omit it.
+    # Derive a shared inches-per-data-unit scale from the tallest panel
+    # so chrome (regions, markers, ref rows) renders at identical physical
+    # size across all panels regardless of sequence count.
+    import patchworklib as pw
+
+    pw.param["margin"] = 0
+
+    last = len(panels) - 1
+    data_heights = [
+        _data_height(p, show_footer=(i == last))
+        for i, p in enumerate(panels)
+    ]
+    # Scale from the tallest panel's default figsize
+    max_idx = max(range(len(panels)), key=lambda i: data_heights[i])
+    ref_w, ref_h = panel_figsize(panels[max_idx])
+    shared_scale = ref_h / _data_height(panels[max_idx])
+
+    bricks = [
+        to_patchwork(
+            panel,
+            label=f"panel_{i}",
+            figsize=(ref_w, data_heights[i] * shared_scale),
+            show_footer=(i == last),
+        )
+        for i, panel in enumerate(panels)
+    ]
+    composed = bricks[0]
+    for brick in bricks[1:]:
+        composed = composed / brick
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    composed.savefig(str(out_path), dpi=dpi)
+    plt.close("all")
+    print(f"Saved: {out_path} ({dpi} dpi, {len(panels)} panel(s))")
 
 
 def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
@@ -177,7 +264,7 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
     plt.close(fig)
 
 
-def _draw_panel(panel: Panel, ax: Axes) -> None:
+def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
     """Draw all 7 layers of a Roark-style panel onto *ax*."""
     aln_len = panel.total_cols
     groups = panel.effective_groups
@@ -226,7 +313,7 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
     )
 
     y_axis_pos = y_seq_start + seq_data_total + 0.5
-    y_max = y_axis_pos + 2.0
+    y_max = y_axis_pos + (2.0 if show_footer else 0.8)
 
     ax.set_xlim(-aln_len * 0.08, aln_len * 1.02)
     ax.set_ylim(y_max, -0.5 if has_title else -0.1)
@@ -472,52 +559,53 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
         )
 
     # -- Layer 7: Legend -------------------------------------------------------
-    legend_y = y_axis_pos + 1.2
-    legend_items = [
-        ("Match", MATCH_COLOR),
-        ("Substitution", MISMATCH_COLOR),
-        ("Gap/Indel", GAP_COLOR),
-    ]
-    if has_markers:
-        legend_items.append(("Marker", panel.marker_color))
+    if show_footer:
+        legend_y = y_axis_pos + 1.2
+        legend_items = [
+            ("Match", MATCH_COLOR),
+            ("Substitution", MISMATCH_COLOR),
+            ("Gap/Indel", GAP_COLOR),
+        ]
+        if has_markers:
+            legend_items.append(("Marker", panel.marker_color))
 
-    legend_x_start = aln_len * 0.25
-    legend_spacing = aln_len * 0.15
+        legend_x_start = aln_len * 0.25
+        legend_spacing = aln_len * 0.15
 
-    for idx, (label, color) in enumerate(legend_items):
-        x = legend_x_start + idx * legend_spacing
-        ax.add_patch(
-            Rectangle(
-                (x, legend_y),
-                aln_len * 0.015,
-                0.4,
-                facecolor=color,
-                edgecolor="#9E9E9E",
-                linewidth=0.3,
+        for idx, (label, color) in enumerate(legend_items):
+            x = legend_x_start + idx * legend_spacing
+            ax.add_patch(
+                Rectangle(
+                    (x, legend_y),
+                    aln_len * 0.015,
+                    0.4,
+                    facecolor=color,
+                    edgecolor="#9E9E9E",
+                    linewidth=0.3,
+                )
             )
+            ax.text(
+                x + aln_len * 0.02,
+                legend_y + 0.2,
+                label,
+                fontsize=5,
+                ha="left",
+                va="center",
+                color="#424242",
+            )
+
+        # Stats summary on the right side of the legend
+        stats = (
+            f"{total_seqs} sequences, "
+            f"{n_groups} samples, "
+            f"{aln_len} positions, {panel.seq_type}"
         )
         ax.text(
-            x + aln_len * 0.02,
+            aln_len * 1.0,
             legend_y + 0.2,
-            label,
+            stats,
             fontsize=5,
-            ha="left",
+            ha="right",
             va="center",
-            color="#424242",
+            color="#757575",
         )
-
-    # Stats summary on the right side of the legend
-    stats = (
-        f"{total_seqs} sequences, "
-        f"{n_groups} samples, "
-        f"{aln_len} positions, {panel.seq_type}"
-    )
-    ax.text(
-        aln_len * 1.0,
-        legend_y + 0.2,
-        stats,
-        fontsize=5,
-        ha="right",
-        va="center",
-        color="#757575",
-    )
