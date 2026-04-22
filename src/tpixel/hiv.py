@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tpixel.fasta import read_fasta
 from tpixel.hxb2 import _is_nucleotide, build_hxb2_map, hxb2_col_labels, hxb2_regions
-from tpixel.models import Marker, Panel, SeqGroup
+from tpixel.models import Marker, Panel, Region, SeqGroup
 from tpixel.pngs import find_pngs_markers, find_pngs_markers_nt
 
 
@@ -86,6 +86,110 @@ def _sort_animal_groups(animal_names: list[str], lineage: str) -> list[str]:
     return self_group + sorted(rec_group) + sorted(other_group)
 
 
+def _apply_region_palette(
+    regions: list[Region], palette: dict[str, str]
+) -> list[Region]:
+    """Override region colors from ``palette`` and merge same-color neighbours.
+
+    When two adjacent regions end up with the same color (e.g. V1 and V2
+    both mapped to pink), they are fused into one ``Region`` whose name
+    joins the originals with ``'/'`` (e.g. ``"V1/V2"``).
+
+    Args:
+        regions: Original list of Region annotations (in column order).
+        palette: Mapping of region name → hex color.  Unknown names are
+            ignored.  Regions whose name is absent keep their prior color.
+
+    Returns:
+        New list of Region objects with overrides + merges applied.
+    """
+    recolored: list[Region] = []
+    for r in regions:
+        new_color = palette.get(r.name, r.color)
+        recolored.append(Region(name=r.name, start=r.start, end=r.end, color=new_color))
+
+    # Merge adjacent regions that share a color AND were both touched by
+    # the palette.  Non-palette regions keep their identity so we do not
+    # accidentally fuse, e.g., neighbouring "EEEEEE" constant bands.
+    merged: list[Region] = []
+    for r in recolored:
+        if (
+            merged
+            and r.name in palette
+            and merged[-1].name.split("/")[0] in palette
+            and merged[-1].color.upper() == r.color.upper()
+            and merged[-1].end == r.start
+        ):
+            prev = merged[-1]
+            prev_names = prev.name.split("/")
+            # Avoid duplicate component names if called twice.
+            if r.name not in prev_names:
+                new_name = prev.name + "/" + r.name
+            else:
+                new_name = prev.name
+            merged[-1] = Region(
+                name=new_name,
+                start=prev.start,
+                end=r.end,
+                color=prev.color,
+            )
+        else:
+            merged.append(r)
+    return merged
+
+
+def _hxb2_nt_col_labels(
+    hxb2_map: list,
+    step: int = 250,
+    seq_type: str | None = None,
+) -> list[tuple[int, str]]:
+    """Build x-axis tick labels at regular HxB2 nucleotide intervals.
+
+    For an AA alignment, NT coordinates are derived from the
+    ``hxb2_aa_pos`` of each mapped column as ``(aa_pos - 1) * 3 + 1``.
+    For an NT alignment the column's implicit NT counter is used.
+
+    Args:
+        hxb2_map: List of HxB2Position entries, one per alignment column.
+        step: Nucleotide tick interval (e.g. 250 NT).
+        seq_type: ``"NT"`` or ``"AA"``.  When ``None``, the first non-gap
+            position is inspected — but callers that know the type should
+            pass it explicitly.
+
+    Returns:
+        List of ``(column_index, nt_label)`` tuples.
+    """
+    # Infer NT position for every mapped column.
+    # For NT alignments: the NT coordinate equals the 1-based NT counter,
+    # which we can recover by iterating non-gap columns in order.
+    # For AA alignments: NT = (aa - 1) * 3 + 1.
+    is_nt = seq_type == "NT"
+    nt_positions: list[tuple[int, int]] = []  # (column, nt_coord)
+    nt_counter = 0
+    for p in hxb2_map:
+        if p.hxb2_aa_pos is None:
+            continue
+        if is_nt:
+            nt_counter += 1
+            nt_coord = nt_counter
+        else:
+            nt_coord = (p.hxb2_aa_pos - 1) * 3 + 1
+        nt_positions.append((p.alignment_col, nt_coord))
+
+    if not nt_positions:
+        return []
+
+    max_nt = max(nt for _col, nt in nt_positions)
+    labels: list[tuple[int, str]] = []
+    for target in range(step, max_nt + 1, step):
+        # Find the first column whose NT coord is >= target.
+        for col, nt in nt_positions:
+            if nt >= target:
+                labels.append((col, str(target)))
+                break
+    return labels
+
+
 def hiv_panel(
     path: str | Path,
     hxb2_id: str = "HxB2",
@@ -94,6 +198,9 @@ def hiv_panel(
     ref_positions: list[int] | None = None,
     seq_type: str | None = None,
     secondary_ref_path: str | Path | None = None,
+    region_palette: dict[str, str] | None = None,
+    show_nt_ruler: bool = False,
+    nt_ruler_step: int = 250,
 ) -> Panel:
     """Build a full Roark-style Panel from an HIV Env alignment.
 
@@ -109,6 +216,20 @@ def hiv_panel(
             Defaults to [1, 2].
         seq_type: ``"NT"`` or ``"AA"``.  Auto-detected from the reference
             sequence when *None*.
+        secondary_ref_path: Optional FASTA with a secondary reference
+            already aligned to this panel's column space.
+        region_palette: Optional mapping of region name (e.g. ``"V3"``,
+            ``"gp41"``) to hex color.  When provided, region colors in the
+            returned Panel are overridden.  If adjacent regions share the
+            same override color (for example both ``"V1"`` and ``"V2"``
+            mapped to pink), they are merged into a single contiguous
+            region (e.g. ``"V1/V2"``) so the renderer draws one band.
+        show_nt_ruler: When ``True``, the returned Panel's ``col_labels``
+            are tick positions in nucleotide coordinates (HxB2 NT numbering)
+            instead of amino-acid positions.  For AA alignments the NT
+            coordinate is computed as ``(aa_pos - 1) * 3 + 1``.
+        nt_ruler_step: Nucleotide interval between ticks when
+            ``show_nt_ruler`` is ``True``.  Default ``250`` NT.
 
     Returns:
         Panel with regions, PNGS markers, grouped sequences, and HxB2 ticks.
@@ -144,7 +265,15 @@ def hiv_panel(
 
     hxb2_map = build_hxb2_map(seqs, hxb2_id, seq_type=seq_type)
     regions = hxb2_regions(hxb2_map)
-    col_labels = hxb2_col_labels(hxb2_map, step=tick_step)
+
+    # Apply region palette override (and merge same-color adjacent regions).
+    if region_palette:
+        regions = _apply_region_palette(regions, region_palette)
+
+    if show_nt_ruler:
+        col_labels = _hxb2_nt_col_labels(hxb2_map, step=nt_ruler_step, seq_type=seq_type)
+    else:
+        col_labels = hxb2_col_labels(hxb2_map, step=tick_step)
 
     if seq_type == "NT":
         markers = find_pngs_markers_nt(ref_seq, hxb2_map)
