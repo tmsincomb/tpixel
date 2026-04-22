@@ -143,6 +143,133 @@ class TestNTRuler:
         with Image.open(out) as im:
             assert im.width > 0 and im.height > 0
 
+    def test_show_nt_ruler_populates_top_ruler_field(self, aa_hiv_fasta):
+        """``show_nt_ruler=True`` populates the dedicated ``nt_ruler_labels``
+        Panel field that drives top-track rendering.
+
+        Backs scrutiny-m2 blocker #2 (the renderer must use a field other
+        than ``col_labels`` so it can render ABOVE the region bar without
+        colliding with Layer 6's bottom x-axis).
+        """
+        panel = hiv_panel(
+            str(aa_hiv_fasta),
+            seq_type="AA",
+            show_nt_ruler=True,
+            nt_ruler_step=250,
+        )
+        assert panel.nt_ruler_labels is not None
+        assert len(panel.nt_ruler_labels) >= 1
+        # Values match the tick-value semantics (multiples of step).
+        for _col, label in panel.nt_ruler_labels:
+            assert int(label) % 250 == 0
+
+    def test_show_nt_ruler_off_leaves_top_ruler_field_none(self, aa_hiv_fasta):
+        """When ``show_nt_ruler=False`` the Panel has no top ruler band."""
+        panel = hiv_panel(str(aa_hiv_fasta), seq_type="AA", tick_step=50)
+        assert panel.nt_ruler_labels is None
+
+    def test_nt_ruler_is_above_region_bar_in_rendered_png(
+        self, aa_hiv_fasta, output_dir
+    ):
+        """Placement assertion: rendered PNG shows NT ruler pixels ABOVE the
+        colored region bar, not below it.
+
+        Strategy: render the panel, then sample a vertical column near the
+        left edge of the image. Walk DOWN from y=0 and find:
+          (1) the first coloured (non-white) pixel band — this is the NT
+              ruler (black tick marks + dark numeric labels).
+          (2) the first coloured pixel band that is distinctly a region
+              color (one of the pastels from the palette / default V1 blue).
+
+        The test asserts that band (1) appears at a smaller y-coordinate
+        (i.e. HIGHER on the page) than band (2).
+        """
+        panel = hiv_panel(
+            str(aa_hiv_fasta),
+            seq_type="AA",
+            show_nt_ruler=True,
+            nt_ruler_step=250,
+            # Use the SHIV palette so the region bar is clearly coloured.
+            region_palette={
+                "V3": "#B2D8B2",
+                "V4": "#7FDBDA",
+                "V5": "#C7A8E0",
+                "gp41": "#FFE28A",
+            },
+        )
+        out = Path(output_dir) / "hiv_nt_ruler_placement.png"
+        render_panels([panel], str(out), dpi=150)
+
+        with Image.open(out) as im:
+            rgb = im.convert("RGB")
+            width, height = rgb.size
+
+            # Probe several columns in the left 30% of the panel so we
+            # have a good chance of crossing a tick mark AND a region-bar
+            # swatch without being distracted by left-margin row labels.
+            probe_xs = [
+                int(width * 0.35),
+                int(width * 0.40),
+                int(width * 0.45),
+                int(width * 0.50),
+                int(width * 0.55),
+            ]
+
+            def _is_dark(px: tuple[int, int, int]) -> bool:
+                # Dark = tick mark or numeric label glyph.
+                return max(px) < 120
+
+            def _is_region_color(px: tuple[int, int, int]) -> bool:
+                # Coloured but NOT white and NOT near-black. The palette
+                # hexes are all mid-value pastels (each channel is in the
+                # ~120..255 range).
+                r, g, b = px
+                if r > 245 and g > 245 and b > 245:
+                    return False  # white / background
+                if max(r, g, b) < 140:
+                    return False  # dark ink
+                if abs(r - g) < 10 and abs(g - b) < 10:
+                    return False  # grey (neutral / match color)
+                return True
+
+            ruler_ys: list[int] = []
+            region_ys: list[int] = []
+
+            for x in probe_xs:
+                first_dark = None
+                first_region = None
+                for y in range(height):
+                    px = rgb.getpixel((x, y))
+                    if first_dark is None and _is_dark(px):
+                        first_dark = y
+                    if first_region is None and _is_region_color(px):
+                        first_region = y
+                    if first_dark is not None and first_region is not None:
+                        break
+                if first_dark is not None:
+                    ruler_ys.append(first_dark)
+                if first_region is not None:
+                    region_ys.append(first_region)
+
+            assert ruler_ys, (
+                "Could not find any dark pixels (expected NT ruler tick / "
+                "numeral ink) in the probed columns of the rendered PNG."
+            )
+            assert region_ys, (
+                "Could not find any coloured region-bar pixels in the "
+                "probed columns of the rendered PNG."
+            )
+
+            # The shallowest dark pixel (smallest y → highest on page)
+            # must be strictly above the shallowest region-colour pixel.
+            first_ruler_y = min(ruler_ys)
+            first_region_y = min(region_ys)
+            assert first_ruler_y < first_region_y, (
+                f"NT ruler must render ABOVE the region bar. "
+                f"first ruler-ink y={first_ruler_y}, "
+                f"first region-colour y={first_region_y}."
+            )
+
 
 # -- VAL-TPIXEL-003: V1/V2 merge via shared palette color ----------------
 

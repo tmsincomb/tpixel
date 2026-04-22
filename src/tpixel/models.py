@@ -84,6 +84,7 @@ class Panel:
     extra_col_labels: list[tuple[int, str]] | None = None
     secondary_ref_row: list[str] | None = None
     heterologous_color: str = "#FF6F00"
+    nt_ruler_labels: list[tuple[int, str]] | None = None
 
     def __post_init__(self) -> None:
         if self.ins_columns is None:

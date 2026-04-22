@@ -271,8 +271,17 @@ def hiv_panel(
         regions = _apply_region_palette(regions, region_palette)
 
     if show_nt_ruler:
-        col_labels = _hxb2_nt_col_labels(hxb2_map, step=nt_ruler_step, seq_type=seq_type)
+        nt_ruler_labels = _hxb2_nt_col_labels(
+            hxb2_map, step=nt_ruler_step, seq_type=seq_type
+        )
+        # Keep ``col_labels`` populated with the same NT-scale values so
+        # callers that inspect ``panel.col_labels`` for tick-value
+        # computation (existing tests) continue to observe NT labels,
+        # while the renderer uses ``nt_ruler_labels`` to draw the dedicated
+        # top header track ABOVE the region color bar (not below).
+        col_labels = nt_ruler_labels
     else:
+        nt_ruler_labels = None
         col_labels = hxb2_col_labels(hxb2_map, step=tick_step)
 
     if seq_type == "NT":
@@ -334,4 +343,5 @@ def hiv_panel(
         groups=groups,
         extra_ref_rows=extra_ref_rows,
         secondary_ref_row=secondary_ref_row,
+        nt_ruler_labels=nt_ruler_labels,
     )

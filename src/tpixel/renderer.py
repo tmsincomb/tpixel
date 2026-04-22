@@ -39,6 +39,12 @@ REF_ROW_HEIGHT = 0.5
 REF_SEQ_PAD = 0.3
 SEQ_DATA_ROW = 0.35
 GROUP_DATA_GAP = 1.0
+# NT ruler (top header track) — drawn ABOVE the region color bar and the
+# marker zone when `panel.nt_ruler_labels` is set. Height leaves room for
+# a row of numeric labels and a tick-mark band that points at the region
+# bar directly below.
+NT_RULER_ZONE_HEIGHT = 1.4
+NT_RULER_PAD = 0.2
 
 
 def _data_height(panel: Panel, *, show_footer: bool = True) -> float:
@@ -55,11 +61,14 @@ def _data_height(panel: Panel, *, show_footer: bool = True) -> float:
     has_regions = bool(panel.regions)
     has_markers = bool(panel.markers)
     has_title = bool(panel.title)
+    has_nt_ruler = bool(panel.nt_ruler_labels)
     n_extra_refs = len(panel.extra_ref_rows) if panel.extra_ref_rows else 0
     total_seqs = panel.total_seqs
     n_groups = len(panel.effective_groups)
 
     y = 0.0
+    if has_nt_ruler:
+        y += NT_RULER_ZONE_HEIGHT + NT_RULER_PAD
     if has_markers:
         y += MARKER_ZONE_HEIGHT + HEADER_MARKER_PAD
     if has_regions:
@@ -274,9 +283,22 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
     has_regions = bool(panel.regions)
     has_markers = bool(panel.markers)
     has_title = bool(panel.title)
+    has_nt_ruler = bool(panel.nt_ruler_labels)
 
     # -- Y coordinate system (data units, top=0 downward) --------------------
     y_cursor = 0.0
+
+    # NT ruler zone (TOP: numeric tick labels + tick marks above everything
+    # else — explicitly positioned ABOVE the region color band per
+    # scrutiny-m2 blocker #2). Drawn only when `panel.nt_ruler_labels` is
+    # populated; otherwise the panel falls back to AA tick marks at the
+    # bottom via `panel.col_labels` + Layer 6.
+    if has_nt_ruler:
+        y_ruler_top = y_cursor
+        y_ruler_bot = y_cursor + NT_RULER_ZONE_HEIGHT
+        y_cursor = y_ruler_bot + NT_RULER_PAD
+    else:
+        y_ruler_top = y_ruler_bot = y_cursor
 
     # Marker zone (ABOVE region header so labels are readable)
     if has_markers:
@@ -331,6 +353,48 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
             fontweight="bold",
             color="#212121",
         )
+
+    # -- Layer 0: NT ruler (TOP header track, drawn above region bar) --------
+    # Numerical labels at the top of the zone, tick marks at the bottom of
+    # the zone (pointing at the region bar directly below). A thin
+    # horizontal baseline demarcates the ruler from the region header so
+    # the two tracks read as distinct rows.
+    if has_nt_ruler:
+        ruler_baseline_y = y_ruler_bot
+        tick_top = ruler_baseline_y - 0.35
+        tick_bot = ruler_baseline_y
+        numeral_y = tick_top - 0.05  # text baseline just above ticks
+
+        # Baseline line across the panel at the bottom of the ruler zone.
+        ax.plot(
+            [0, aln_len],
+            [ruler_baseline_y, ruler_baseline_y],
+            color="#424242",
+            linewidth=0.4,
+            zorder=2,
+        )
+
+        for col_idx, label in panel.nt_ruler_labels or []:
+            x = col_idx + 0.5
+            # Tick mark.
+            ax.plot(
+                [x, x],
+                [tick_top, tick_bot],
+                color="#424242",
+                linewidth=0.6,
+                zorder=3,
+            )
+            # Numeric label ABOVE the tick marks, ABOVE the region bar.
+            ax.text(
+                x,
+                numeral_y,
+                label,
+                fontsize=5,
+                ha="center",
+                va="bottom",
+                color="#212121",
+                zorder=3,
+            )
 
     # -- Layer 2: Region header -----------------------------------------------
     if has_regions:
@@ -544,7 +608,13 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
         )
 
     # -- Layer 6: X-axis ticks -------------------------------------------------
-    for col_idx, label in panel.col_labels:
+    # When the NT ruler is drawn as a dedicated top header track
+    # (`panel.nt_ruler_labels`), suppress the bottom tick row that would
+    # otherwise duplicate the same numeric labels underneath the sequence
+    # block. The feature contract requires the ruler ABOVE the region bar,
+    # NOT as bottom x-axis ticks.
+    col_label_iter = [] if has_nt_ruler else panel.col_labels
+    for col_idx, label in col_label_iter:
         ax.plot(
             [col_idx + 0.5, col_idx + 0.5],
             [y_axis_pos - 0.2, y_axis_pos + 0.1],
