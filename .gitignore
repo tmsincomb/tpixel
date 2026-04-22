@@ -218,3 +218,6 @@ mid_env_protein_aligned.fasta
 bot_env_protein_aligned.fasta
 combined.png
 tpixel.skill
+# Local prototype artifacts
+pixel_logo_prototype.png
+proto_pixel_logo.py
