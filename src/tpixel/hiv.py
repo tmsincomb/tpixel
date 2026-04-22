@@ -93,6 +93,7 @@ def hiv_panel(
     tick_step: int = 50,
     ref_positions: list[int] | None = None,
     seq_type: str | None = None,
+    secondary_ref_path: str | Path | None = None,
 ) -> Panel:
     """Build a full Roark-style Panel from an HIV Env alignment.
 
@@ -176,6 +177,22 @@ def hiv_panel(
     sorted_animals = _sort_animal_groups(list(animal_seqs.keys()), lineage)
     groups = [SeqGroup(name=a, seqs=animal_seqs[a]) for a in sorted_animals]
 
+    # Optional secondary reference for heterologous-recombination coloring.
+    # The provided FASTA must contain a single sequence already aligned to
+    # this panel's column space (e.g. via `mafft --add --keeplength`).
+    secondary_ref_row: list[str] | None = None
+    if secondary_ref_path is not None:
+        sec_seqs = read_fasta(secondary_ref_path)
+        if not sec_seqs:
+            raise ValueError(f"No sequences in secondary ref {secondary_ref_path}")
+        _, sec_seq = sec_seqs[0]
+        if len(sec_seq) != aln_len:
+            raise ValueError(
+                f"Secondary ref length {len(sec_seq)} != panel length {aln_len}; "
+                "use `mafft --add --keeplength` to align it to the panel coordinates."
+            )
+        secondary_ref_row = list(sec_seq.upper())
+
     return Panel(
         label=ref_id,
         ref_row=ref_row,
@@ -187,4 +204,5 @@ def hiv_panel(
         marker_color="#4CAF50",
         groups=groups,
         extra_ref_rows=extra_ref_rows,
+        secondary_ref_row=secondary_ref_row,
     )

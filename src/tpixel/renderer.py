@@ -351,7 +351,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                     region.start + width / 2,
                     (y_region_top + y_region_bot) / 2,
                     region.name,
-                    fontsize=5,
+                    fontsize=10,
                     ha="center",
                     va="center",
                     fontweight="bold",
@@ -436,7 +436,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                 -aln_len * 0.005,
                 (y_eref + eref_bot) / 2,
                 eref_label,
-                fontsize=5,
+                fontsize=10,
                 ha="right",
                 va="center",
                 fontweight="bold",
@@ -470,7 +470,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
         -aln_len * 0.005,
         (y_ref_top + y_ref_bot) / 2,
         panel.label,
-        fontsize=5,
+        fontsize=10,
         ha="right",
         va="center",
         fontweight="bold",
@@ -499,6 +499,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
             )
 
             # Overdraw mutations and gaps
+            sec_ref = panel.secondary_ref_row
             for i, base in enumerate(row):
                 if base == " ":
                     continue
@@ -507,6 +508,8 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                     color = GAP_COLOR
                 elif base == ref_base:
                     continue
+                elif sec_ref is not None and i < len(sec_ref) and base == sec_ref[i]:
+                    color = panel.heterologous_color
                 else:
                     color = MISMATCH_COLOR
                 ax.add_patch(
@@ -534,7 +537,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
             -aln_len * 0.005,
             y_center,
             label,
-            fontsize=4,
+            fontsize=8,
             ha="right",
             va="center",
             color="#424242",
@@ -553,19 +556,47 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
             y_axis_pos + 0.2,
             label,
             fontsize=4,
-            ha="center",
+            ha="right",
             va="top",
+            rotation=45,
+            rotation_mode="anchor",
             color="#424242",
         )
 
+    # -- Layer 6b: Extra x-axis ticks (second row, e.g. mutation positions) ---
+    if panel.extra_col_labels:
+        extra_y = y_axis_pos + 0.8
+        for col_idx, label in panel.extra_col_labels:
+            ax.plot(
+                [col_idx + 0.5, col_idx + 0.5],
+                [y_axis_pos - 0.2, extra_y],
+                color="#D32F2F",
+                linewidth=0.3,
+                linestyle=":",
+                alpha=0.5,
+            )
+            ax.text(
+                col_idx + 0.5,
+                extra_y + 0.05,
+                label,
+                fontsize=3.5,
+                ha="right",
+                va="top",
+                rotation=45,
+                rotation_mode="anchor",
+                color="#D32F2F",
+            )
+
     # -- Layer 7: Legend -------------------------------------------------------
     if show_footer:
-        legend_y = y_axis_pos + 1.2
+        legend_y = y_axis_pos + 1.8
         legend_items = [
             ("Match", MATCH_COLOR),
             ("Substitution", MISMATCH_COLOR),
             ("Gap/Indel", GAP_COLOR),
         ]
+        if panel.secondary_ref_row is not None:
+            legend_items.append(("Heterologous", panel.heterologous_color))
         if has_markers:
             legend_items.append(("Marker", panel.marker_color))
 
@@ -595,9 +626,10 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
             )
 
         # Stats summary on the right side of the legend
+        sample_word = "sample" if n_groups == 1 else "samples"
         stats = (
             f"{total_seqs} sequences, "
-            f"{n_groups} samples, "
+            f"{n_groups} {sample_word}, "
             f"{aln_len} positions, {panel.seq_type}"
         )
         ax.text(

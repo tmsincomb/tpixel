@@ -81,6 +81,9 @@ class Panel:
     groups: list[SeqGroup] | None = None
     title: str | None = None
     extra_ref_rows: list[tuple[str, list[str]]] | None = None
+    extra_col_labels: list[tuple[int, str]] | None = None
+    secondary_ref_row: list[str] | None = None
+    heterologous_color: str = "#FF6F00"
 
     def __post_init__(self) -> None:
         if self.ins_columns is None:
