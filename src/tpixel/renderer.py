@@ -24,6 +24,75 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from tpixel.models import Panel
 
+
+def compute_row_labels(panel: Panel) -> list[str]:
+    """Return left-margin row labels in top-to-bottom render order.
+
+    The returned list enumerates labels for every row the renderer draws
+    a text label for:
+
+    1. ``panel.extra_ref_rows`` (e.g. HxB2) — rendered ABOVE the primary
+       reference, unnumbered, using each tuple's first element.
+    2. The primary reference row — labelled ``panel.label`` (e.g.
+       ``"<lineage>_ref"``), unnumbered.
+    3. Data rows from ``panel.effective_groups`` — labelled according to
+       ``panel.row_label_mode``:
+
+       - ``"group_rollup"`` produces one label per group
+         (``"{name} ({count})"``).  Groups with an empty name emit no
+         label, matching the existing renderer behaviour.
+       - ``"per_row_numbered"`` produces one label per sequence,
+         ``"{N}. {short_seqid}"``, with ``N`` starting at 1 and
+         monotonically incrementing across groups.
+       - ``"raw_seqid"`` produces one label per sequence, just
+         ``short_seqid``.
+
+    ``short_seqid`` is the sequence ID truncated to
+    ``panel.row_label_max_chars`` characters.
+
+    This helper mirrors (but does not execute) the label-placement logic
+    in :func:`_draw_panel` so tests can assert label content without
+    inspecting matplotlib ``Text`` objects.
+
+    Examples:
+        >>> from tpixel.models import Panel, SeqGroup
+        >>> p = Panel(
+        ...     label="LIN_ref",
+        ...     ref_row=list("A"),
+        ...     seq_rows=[],
+        ...     total_cols=1,
+        ...     col_labels=[],
+        ...     extra_ref_rows=[("HxB2", list("A"))],
+        ...     groups=[SeqGroup("g", [("s1", list("A")), ("s2", list("A"))])],
+        ...     row_label_mode="per_row_numbered",
+        ... )
+        >>> compute_row_labels(p)
+        ['HxB2', 'LIN_ref', '1. s1', '2. s2']
+    """
+    labels: list[str] = []
+    if panel.extra_ref_rows:
+        for eref_label, _bases in panel.extra_ref_rows:
+            labels.append(eref_label)
+    labels.append(panel.label)
+
+    mode = panel.row_label_mode
+    max_chars = panel.row_label_max_chars
+    n = 1
+    for group in panel.effective_groups:
+        if mode == "group_rollup":
+            if group.name:
+                labels.append(f"{group.name} ({len(group.seqs)})")
+        elif mode == "per_row_numbered":
+            for seq_id, _bases in group.seqs:
+                labels.append(f"{n}. {seq_id[:max_chars]}")
+                n += 1
+        elif mode == "raw_seqid":
+            for seq_id, _bases in group.seqs:
+                labels.append(seq_id[:max_chars])
+        else:  # pragma: no cover — Literal type prevents unknown values
+            raise ValueError(f"Unknown row_label_mode: {mode!r}")
+    return labels
+
 # -- Roark 3-color scheme --------------------------------------------------
 MATCH_COLOR = "#BDBDBD"
 MISMATCH_COLOR = "#D32F2F"
@@ -542,14 +611,22 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
     )
 
     # -- Layer 5: Sequence group blocks ----------------------------------------
+    mode = panel.row_label_mode
+    max_chars = panel.row_label_max_chars
+
     y_cursor = y_seq_start
+    # Group-rollup labels: (y_center, group_name, seq_count).
     label_positions: list[tuple[float, str, int]] = []
+    # Per-row labels (per_row_numbered / raw_seqid): (y_center, label_str).
+    per_row_label_positions: list[tuple[float, str]] = []
+    row_counter = 1
 
     for group_idx, group in enumerate(groups):
         group_y_start = y_cursor
 
-        for _seq_id, row in group.seqs:
+        for seq_id, row in group.seqs:
             row_y = y_cursor
+            row_center = row_y + SEQ_DATA_ROW * 0.85 / 2
 
             # Grey background for entire row
             ax.add_patch(
@@ -586,6 +663,17 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                     )
                 )
 
+            # Collect per-row label positions for non-group-rollup modes.
+            if mode == "per_row_numbered":
+                per_row_label_positions.append(
+                    (row_center, f"{row_counter}. {seq_id[:max_chars]}")
+                )
+                row_counter += 1
+            elif mode == "raw_seqid":
+                per_row_label_positions.append(
+                    (row_center, seq_id[:max_chars])
+                )
+
             y_cursor += SEQ_DATA_ROW
 
         group_y_center = (group_y_start + y_cursor) / 2
@@ -595,17 +683,32 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
         if group_idx < n_groups - 1:
             y_cursor += GROUP_DATA_GAP
 
-    for y_center, name, count in label_positions:
-        label = f"{name} ({count})"
-        ax.text(
-            -aln_len * 0.005,
-            y_center,
-            label,
-            fontsize=8,
-            ha="right",
-            va="center",
-            color="#424242",
-        )
+    if mode == "group_rollup":
+        for y_center, name, count in label_positions:
+            label = f"{name} ({count})"
+            ax.text(
+                -aln_len * 0.005,
+                y_center,
+                label,
+                fontsize=8,
+                ha="right",
+                va="center",
+                color="#424242",
+            )
+    else:
+        # Per-row labels: many labels stacked tightly, so use a smaller
+        # fontsize (matching Layer 6 col-label ticks) to keep the left
+        # margin compact for panels with ~100+ data rows.
+        for y_center, row_label in per_row_label_positions:
+            ax.text(
+                -aln_len * 0.005,
+                y_center,
+                row_label,
+                fontsize=4,
+                ha="right",
+                va="center",
+                color="#424242",
+            )
 
     # -- Layer 6: X-axis ticks -------------------------------------------------
     # When the NT ruler is drawn as a dedicated top header track

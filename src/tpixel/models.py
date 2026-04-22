@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+RowLabelMode = Literal["group_rollup", "per_row_numbered", "raw_seqid"]
 
 
 @dataclass
@@ -67,6 +70,33 @@ class Panel:
         title: Optional title displayed above the panel.
         extra_ref_rows: Additional reference-style rows rendered above
                         the primary ref_row as (label, bases) tuples.
+        row_label_mode: How left-margin row labels are rendered for data
+                        rows (the rows in ``groups[*].seqs``).  Reference
+                        rows (``extra_ref_rows`` and the primary
+                        ``ref_row`` labeled by ``panel.label``) are ALWAYS
+                        drawn with their logical label and are never
+                        numbered, regardless of mode.  Three modes:
+
+                        - ``"group_rollup"`` (default, preserves existing
+                          behavior): one label per group, formatted as
+                          ``"{group.name} ({len(group.seqs)})"``, placed
+                          at the vertical center of the group's rows.
+                        - ``"per_row_numbered"``: one label per data row
+                          formatted as ``"{N}. {short_seqid}"`` where
+                          ``N`` starts at 1 for the first data row and
+                          increments monotonically within the panel (it
+                          does not restart at group boundaries).
+                        - ``"raw_seqid"``: one label per data row
+                          containing just ``short_seqid`` (no ``N.``
+                          prefix).
+
+                        ``short_seqid`` is the sequence ID truncated to
+                        ``row_label_max_chars`` characters.
+        row_label_max_chars: Maximum characters kept when truncating
+                        ``seq_id`` to ``short_seqid`` for per-row label
+                        modes.  Defaults to 30, enough to distinguish
+                        typical SHIV/HIV SGS identifiers while keeping
+                        the left margin narrow.
     """
 
     label: str
@@ -85,6 +115,8 @@ class Panel:
     secondary_ref_row: list[str] | None = None
     heterologous_color: str = "#FF6F00"
     nt_ruler_labels: list[tuple[int, str]] | None = None
+    row_label_mode: RowLabelMode = "group_rollup"
+    row_label_max_chars: int = 30
 
     def __post_init__(self) -> None:
         if self.ins_columns is None:

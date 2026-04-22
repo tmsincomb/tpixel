@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tpixel.fasta import read_fasta
 from tpixel.hxb2 import _is_nucleotide, build_hxb2_map, hxb2_col_labels, hxb2_regions
-from tpixel.models import Marker, Panel, Region, SeqGroup
+from tpixel.models import Marker, Panel, Region, RowLabelMode, SeqGroup
 from tpixel.pngs import find_pngs_markers, find_pngs_markers_nt
 
 
@@ -201,6 +201,8 @@ def hiv_panel(
     region_palette: dict[str, str] | None = None,
     show_nt_ruler: bool = False,
     nt_ruler_step: int = 250,
+    row_label_mode: RowLabelMode = "group_rollup",
+    row_label_max_chars: int = 30,
 ) -> Panel:
     """Build a full Roark-style Panel from an HIV Env alignment.
 
@@ -230,6 +232,17 @@ def hiv_panel(
             coordinate is computed as ``(aa_pos - 1) * 3 + 1``.
         nt_ruler_step: Nucleotide interval between ticks when
             ``show_nt_ruler`` is ``True``.  Default ``250`` NT.
+        row_label_mode: How the renderer draws the left-margin row labels
+            for data rows.  One of ``"group_rollup"`` (default; one
+            ``"{name} ({count})"`` label per group, preserving existing
+            behaviour), ``"per_row_numbered"`` (one ``"{N}. {short_seqid}"``
+            label per data row; N starts at 1 and monotonically increments
+            within the panel; reference rows are NOT numbered), or
+            ``"raw_seqid"`` (one ``short_seqid`` label per data row).
+            ``short_seqid`` is ``seq_id[:row_label_max_chars]``.
+        row_label_max_chars: Truncation length for per-row labels.
+            Default ``30`` — enough to distinguish typical SHIV/HIV SGS
+            identifiers while keeping the left margin compact.
 
     Returns:
         Panel with regions, PNGS markers, grouped sequences, and HxB2 ticks.
@@ -344,4 +357,6 @@ def hiv_panel(
         extra_ref_rows=extra_ref_rows,
         secondary_ref_row=secondary_ref_row,
         nt_ruler_labels=nt_ruler_labels,
+        row_label_mode=row_label_mode,
+        row_label_max_chars=row_label_max_chars,
     )

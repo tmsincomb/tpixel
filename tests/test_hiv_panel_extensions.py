@@ -13,7 +13,8 @@ import pytest
 from PIL import Image
 
 from tpixel.hiv import hiv_panel
-from tpixel.renderer import render_panels
+from tpixel.models import Panel, SeqGroup
+from tpixel.renderer import compute_row_labels, render_panels
 
 # -- Fixtures -------------------------------------------------------------
 
@@ -325,6 +326,251 @@ class TestV1V2Merge:
         names = [r.name for r in panel.regions or []]
         assert "V1" in names
         assert "V2" in names
+
+
+# -- VAL-FIG-ROWLABELS-001: row_label_mode --------------------------------
+
+
+def _make_test_panel(
+    row_label_mode: str = "group_rollup",
+    row_label_max_chars: int = 30,
+    extra_ref_rows: list[tuple[str, list[str]]] | None = None,
+    groups: list[SeqGroup] | None = None,
+    label: str = "CH505_ref",
+) -> Panel:
+    """Build a minimal Panel exercising the row-label codepath only.
+
+    Using the Panel constructor directly (rather than ``hiv_panel``)
+    avoids the HxB2-mapping requirements for these label-only tests, so
+    we can pin exact seq IDs, group membership, and reference-row
+    composition and then assert the label list produced by
+    :func:`compute_row_labels`.
+    """
+    ref_row = list("A")
+    if groups is None:
+        groups = [
+            SeqGroup("animalA", [("animalA_s1", list("A")), ("animalA_s2", list("A"))]),
+            SeqGroup("animalB", [("animalB_s1", list("A"))]),
+        ]
+    return Panel(
+        label=label,
+        ref_row=ref_row,
+        seq_rows=[],
+        total_cols=1,
+        col_labels=[],
+        groups=groups,
+        extra_ref_rows=extra_ref_rows,
+        row_label_mode=row_label_mode,
+        row_label_max_chars=row_label_max_chars,
+    )
+
+
+class TestRowLabelMode:
+    """Tests for ``Panel.row_label_mode`` and ``compute_row_labels``.
+
+    Backs VAL-FIG-ROWLABELS-001 (option b: reference rows unnumbered)
+    and the scrutiny-m2 blocker #3 fix — per-row numbered labels on the
+    SHIV figure_s4e.png.
+    """
+
+    def test_default_mode_is_group_rollup(self):
+        """Default ``row_label_mode`` is ``"group_rollup"`` (backwards-compat)."""
+        panel = Panel(
+            label="lin_ref",
+            ref_row=list("A"),
+            seq_rows=[("s1", list("A"))],
+            total_cols=1,
+            col_labels=[],
+        )
+        assert panel.row_label_mode == "group_rollup"
+        assert panel.row_label_max_chars == 30
+
+    def test_group_rollup_labels_match_existing_format(self):
+        """``group_rollup`` emits one ``{name} ({count})`` label per group
+        after the (unnumbered) reference rows."""
+        panel = _make_test_panel(
+            row_label_mode="group_rollup",
+            extra_ref_rows=[("HxB2", list("A"))],
+            label="CH505_ref",
+        )
+        labels = compute_row_labels(panel)
+        assert labels == [
+            "HxB2",
+            "CH505_ref",
+            "animalA (2)",
+            "animalB (1)",
+        ]
+
+    def test_per_row_numbered_labels_numbered_monotonically(self):
+        """``per_row_numbered`` emits ``N. <short_seqid>`` for every data
+        row with N starting at 1 and incrementing monotonically across
+        group boundaries; reference rows (``_ref`` and ``HxB2``) are
+        present unnumbered in the expected render order."""
+        groups = [
+            SeqGroup("g1", [
+                ("r18012_AAA_clone1", list("A")),
+                ("r18012_BBB_clone2", list("A")),
+            ]),
+            SeqGroup("g2", [("rhBD06_CCC_clone1", list("A"))]),
+        ]
+        panel = _make_test_panel(
+            row_label_mode="per_row_numbered",
+            extra_ref_rows=[("HxB2", list("A"))],
+            groups=groups,
+            label="CH505_ref",
+        )
+        labels = compute_row_labels(panel)
+        # Reference rows first (in render order: extra_ref above primary ref),
+        # then data rows numbered starting at 1.
+        assert labels == [
+            "HxB2",
+            "CH505_ref",
+            "1. r18012_AAA_clone1",
+            "2. r18012_BBB_clone2",
+            "3. rhBD06_CCC_clone1",
+        ]
+        # Explicit prefix checks (matches verificationSteps/expectedBehavior
+        # wording: "labels start with `1. `, `2. `, ...").
+        data_labels = labels[2:]
+        assert data_labels[0].startswith("1. ")
+        assert data_labels[1].startswith("2. ")
+        assert data_labels[2].startswith("3. ")
+        # Reference labels are NOT numbered.
+        assert "HxB2" in labels
+        assert "CH505_ref" in labels
+        for ref_label in ("HxB2", "CH505_ref"):
+            assert not ref_label[0].isdigit(), (
+                f"Reference row label {ref_label!r} must not start with a digit"
+            )
+
+    def test_per_row_numbered_truncates_long_seqids(self):
+        """``short_seqid`` is the first ``row_label_max_chars`` characters
+        of the raw seq ID (default 30)."""
+        long_id = "A" * 80  # 80 characters
+        groups = [SeqGroup("g", [(long_id, list("A"))])]
+        panel = _make_test_panel(
+            row_label_mode="per_row_numbered",
+            groups=groups,
+            extra_ref_rows=None,
+        )
+        labels = compute_row_labels(panel)
+        # Last label is the single data row.
+        data_label = labels[-1]
+        assert data_label.startswith("1. ")
+        # Everything after the "1. " prefix is the truncated seq_id.
+        short = data_label[len("1. "):]
+        assert len(short) == 30
+        assert short == "A" * 30
+
+    def test_per_row_numbered_custom_max_chars(self):
+        """``row_label_max_chars`` is honoured when overridden."""
+        long_id = "SHIV_LONG_IDENTIFIER_AAA_BBB_CCC_DDD"  # > 15 chars
+        groups = [SeqGroup("g", [(long_id, list("A"))])]
+        panel = _make_test_panel(
+            row_label_mode="per_row_numbered",
+            row_label_max_chars=15,
+            groups=groups,
+            extra_ref_rows=None,
+        )
+        labels = compute_row_labels(panel)
+        data_label = labels[-1]
+        short = data_label[len("1. "):]
+        assert len(short) == 15
+        assert short == long_id[:15]
+
+    def test_raw_seqid_emits_seqid_per_row_without_numbering(self):
+        """``raw_seqid`` emits one ``short_seqid`` label per data row
+        with no numeric prefix; reference rows remain unnumbered."""
+        groups = [
+            SeqGroup("g1", [("abc_1", list("A"))]),
+            SeqGroup("g2", [("xyz_2", list("A")), ("xyz_3", list("A"))]),
+        ]
+        panel = _make_test_panel(
+            row_label_mode="raw_seqid",
+            extra_ref_rows=[("HxB2", list("A"))],
+            groups=groups,
+            label="SF162p3_ref",
+        )
+        labels = compute_row_labels(panel)
+        assert labels == [
+            "HxB2",
+            "SF162p3_ref",
+            "abc_1",
+            "xyz_2",
+            "xyz_3",
+        ]
+        # None of the data labels carry an "N. " prefix.
+        for data_label in labels[2:]:
+            assert "." not in data_label.split("_")[0], (
+                f"raw_seqid mode should NOT add a numeric prefix, got {data_label!r}"
+            )
+
+    def test_per_row_numbered_without_extra_ref_rows(self):
+        """Without ``extra_ref_rows`` the render order is just primary
+        ref then numbered data rows."""
+        groups = [SeqGroup("g", [("alpha", list("A")), ("beta", list("A"))])]
+        panel = _make_test_panel(
+            row_label_mode="per_row_numbered",
+            extra_ref_rows=None,
+            groups=groups,
+            label="T250-4_ref",
+        )
+        labels = compute_row_labels(panel)
+        assert labels == [
+            "T250-4_ref",
+            "1. alpha",
+            "2. beta",
+        ]
+
+    def test_per_row_numbered_renders_to_png(self, output_dir):
+        """End-to-end: a panel with ``per_row_numbered`` labels renders
+        without errors and produces a non-empty PNG."""
+        groups = [SeqGroup("g", [("alpha_seq", list("A")), ("beta_seq", list("A"))])]
+        panel = Panel(
+            label="LIN_ref",
+            ref_row=list("A" * 40),
+            seq_rows=[],
+            total_cols=40,
+            col_labels=[(0, "1"), (20, "20"), (39, "40")],
+            groups=[
+                SeqGroup(
+                    "g",
+                    [
+                        ("alpha_seq", list("A" * 40)),
+                        ("beta_seq", list("A" * 40)),
+                    ],
+                )
+            ],
+            extra_ref_rows=[("HxB2", list("A" * 40))],
+            row_label_mode="per_row_numbered",
+        )
+        out = Path(output_dir) / "row_labels_per_row_numbered.png"
+        render_panels([panel], str(out), dpi=100)
+        assert out.exists()
+        assert out.stat().st_size > 0
+        with Image.open(out) as im:
+            assert im.width > 0 and im.height > 0
+
+    def test_hiv_panel_threads_row_label_mode(self, aa_hiv_fasta):
+        """``hiv_panel()`` accepts ``row_label_mode`` and forwards it to
+        the returned Panel so SHIV's ``figure_s4e.py`` can opt in."""
+        panel = hiv_panel(
+            str(aa_hiv_fasta),
+            seq_type="AA",
+            row_label_mode="per_row_numbered",
+        )
+        assert panel.row_label_mode == "per_row_numbered"
+        # And the label list from compute_row_labels has numbered data rows.
+        labels = compute_row_labels(panel)
+        # All non-reference labels are of the form "N. ..."
+        ref_label_set = {panel.label}
+        if panel.extra_ref_rows:
+            ref_label_set.update(name for name, _ in panel.extra_ref_rows)
+        data_labels = [label for label in labels if label not in ref_label_set]
+        for i, label in enumerate(data_labels, start=1):
+            assert label.startswith(f"{i}. "), (
+                f"Expected label #{i} to start with {i!r}., got {label!r}"
+            )
 
 
 # -- write_fasta fixture in conftest is tmp_path-scoped, but this test
