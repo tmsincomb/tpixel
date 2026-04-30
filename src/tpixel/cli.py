@@ -4,6 +4,7 @@ import sys
 
 import click
 
+from tpixel.anchors import KNOWN_ANCHOR_LINEAGES, detect_anchor_lineage
 from tpixel.fasta import fasta_panel, read_fasta
 from tpixel.renderer import render_panels
 
@@ -29,19 +30,30 @@ def _expand_stdin(paths: list[str]) -> list[str]:
 
 
 def _auto_detect_hiv(fasta_path: str) -> bool:
-    """Check if alignment contains HxB2 and a ``*_ref`` sequence.
+    """Check if alignment qualifies for HIV mode.
+
+    HIV mode is triggered when either:
+
+    * the alignment contains an ``HxB2`` row plus a ``*_ref`` row
+      (classic dual-reference layout), or
+    * the alignment lacks ``HxB2`` but contains a ``*_ref`` row whose
+      lineage prefix matches a known anchor (e.g. ``SF162p3_ref``,
+      ``CH505_ref``, ``T250-4_ref``) so the renderer can still place the
+      region bar via the bundled lineage→HxB2 mapping.
 
     Args:
         fasta_path: Path to the aligned FASTA file.
 
     Returns:
-        ``True`` if both HxB2 and a ``*_ref`` sequence are present.
+        ``True`` if HIV mode applies.
     """
     seqs = read_fasta(fasta_path)
     names = {n.split()[0] for n, _ in seqs}
     has_hxb2 = "HxB2" in names
-    has_ref = any(n.endswith("_ref") for n in names)
-    return has_hxb2 and has_ref
+    refs = [n for n in names if n.endswith("_ref")]
+    if has_hxb2 and refs:
+        return True
+    return any(detect_anchor_lineage(n) is not None for n in refs)
 
 
 @click.command(
@@ -94,7 +106,53 @@ def _auto_detect_hiv(fasta_path: str) -> bool:
     default=None,
     help="Title displayed above the plot.",
 )
-def main(fasta_args, fasta, columns, output, dpi, cell, hiv, nt, ref_pos, title):
+@click.option(
+    "--variant-labels/--no-variant-labels",
+    "variant_labels",
+    default=False,
+    show_default=True,
+    help="Draw 'wildtype+pos+mutation' labels (e.g. K169E) under the x-axis "
+    "for every column where the lineage _ref differs from HxB2. HIV mode only. "
+    "Works in anchor mode too — labels are computed against the bundled HxB2 "
+    "residues carried by the lineage→HxB2 mapping.",
+)
+@click.option(
+    "--anchor-id",
+    default=None,
+    help="Sequence ID to use as the header coordinate anchor when HxB2 is "
+    "absent from the alignment. Defaults to the primary _ref row.",
+)
+@click.option(
+    "--anchor-lineage",
+    default=None,
+    type=click.Choice(list(KNOWN_ANCHOR_LINEAGES)),
+    help="Anchor lineage. Auto-detected from the anchor-id prefix if omitted "
+    "(e.g. SF162p3_ref → SF162p3). Ignored when HxB2 is in the alignment.",
+)
+@click.option(
+    "--markers/--no-markers",
+    "markers",
+    default=True,
+    show_default=True,
+    help="Show annotation markers above the reference row (currently PNGS "
+    "green dots in HIV mode). Use --no-markers to suppress them.",
+)
+def main(
+    fasta_args,
+    fasta,
+    columns,
+    output,
+    dpi,
+    cell,
+    hiv,
+    nt,
+    ref_pos,
+    title,
+    variant_labels,
+    markers,
+    anchor_id,
+    anchor_lineage,
+):
     """Pixel-block alignment viewer for hundreds of sequences.
 
     Renders Roark-style PIXEL plots: grey=match, red=substitution, black=gap.
@@ -128,8 +186,20 @@ def main(fasta_args, fasta, columns, output, dpi, cell, hiv, nt, ref_pos, title)
                 seq_type = "NT"
             elif nt is False:
                 seq_type = "AA"
-            panel = hiv_panel(fasta_path, ref_positions=ref_positions, seq_type=seq_type)
+            panel = hiv_panel(
+                fasta_path,
+                ref_positions=ref_positions,
+                seq_type=seq_type,
+                show_variant_labels=variant_labels,
+                show_markers=markers,
+                anchor_id=anchor_id,
+                anchor_lineage=anchor_lineage,
+            )
         else:
+            if variant_labels:
+                raise click.UsageError(
+                    "--variant-labels requires HIV mode"
+                )
             panel = fasta_panel(fasta_path, col_start, col_end, ref_positions=ref_positions)
 
         if title:

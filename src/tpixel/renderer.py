@@ -148,8 +148,9 @@ def _data_height(panel: Panel, *, show_footer: bool = True) -> float:
     y += REF_ROW_HEIGHT + REF_SEQ_PAD  # primary ref
 
     seq_data_total = total_seqs * SEQ_DATA_ROW + max(0, n_groups - 1) * GROUP_DATA_GAP
-    # 0.5 gap before axis; 2.0 for legend or 0.8 for axis labels only
-    y += seq_data_total + 0.5 + (2.0 if show_footer else 0.8)
+    # 0.5 gap before axis; 3.0 for legend (clearance from rotated x-tick
+    # labels) or 0.8 for axis labels only
+    y += seq_data_total + 0.5 + (3.0 if show_footer else 0.8)
 
     # Account for title headroom in ylim
     if has_title:
@@ -286,9 +287,18 @@ def render_panels(
     # Derive a shared inches-per-data-unit scale from the tallest panel
     # so chrome (regions, markers, ref rows) renders at identical physical
     # size across all panels regardless of sequence count.
+    import uuid
+
     import patchworklib as pw
 
     pw.param["margin"] = 0
+
+    # patchworklib enforces globally-unique Brick labels via a module-level
+    # _labelset, so reusing "panel_0"/"panel_1" across multiple
+    # render_panels calls (e.g. across pytest cases in one process)
+    # raises ValueError. Suffix every label with a fresh uuid to keep the
+    # labels stable within one call but unique across calls.
+    call_id = uuid.uuid4().hex[:8]
 
     last = len(panels) - 1
     data_heights = [
@@ -303,7 +313,7 @@ def render_panels(
     bricks = [
         to_patchwork(
             panel,
-            label=f"panel_{i}",
+            label=f"panel_{i}_{call_id}",
             figsize=(ref_w, data_heights[i] * shared_scale),
             show_footer=(i == last),
         )
@@ -404,7 +414,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
     )
 
     y_axis_pos = y_seq_start + seq_data_total + 0.5
-    y_max = y_axis_pos + (2.0 if show_footer else 0.8)
+    y_max = y_axis_pos + (3.0 if show_footer else 0.8)
 
     ax.set_xlim(-aln_len * 0.08, aln_len * 1.02)
     ax.set_ylim(y_max, -0.5 if has_title else -0.1)
@@ -416,7 +426,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
             aln_len / 2,
             -0.3,
             panel.title,
-            fontsize=8,
+            fontsize=6,
             ha="center",
             va="bottom",
             fontweight="bold",
@@ -458,7 +468,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                 x,
                 numeral_y,
                 label,
-                fontsize=5,
+                fontsize=4,
                 ha="center",
                 va="bottom",
                 color="#212121",
@@ -484,7 +494,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                     region.start + width / 2,
                     (y_region_top + y_region_bot) / 2,
                     region.name,
-                    fontsize=10,
+                    fontsize=6,
                     ha="center",
                     va="center",
                     fontweight="bold",
@@ -530,7 +540,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                 col + 0.5,
                 y_text,
                 marker.label,
-                fontsize=2.5,
+                fontsize=4,
                 ha="center",
                 va=va,
                 rotation=0,
@@ -569,7 +579,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                 -aln_len * 0.005,
                 (y_eref + eref_bot) / 2,
                 eref_label,
-                fontsize=10,
+                fontsize=6,
                 ha="right",
                 va="center",
                 fontweight="bold",
@@ -603,7 +613,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
         -aln_len * 0.005,
         (y_ref_top + y_ref_bot) / 2,
         panel.label,
-        fontsize=10,
+        fontsize=6,
         ha="right",
         va="center",
         fontweight="bold",
@@ -690,21 +700,20 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                 -aln_len * 0.005,
                 y_center,
                 label,
-                fontsize=8,
+                fontsize=6,
                 ha="right",
                 va="center",
                 color="#424242",
             )
     else:
-        # Per-row labels: many labels stacked tightly, so use a smaller
-        # fontsize (matching Layer 6 col-label ticks) to keep the left
-        # margin compact for panels with ~100+ data rows.
+        # Per-row labels: many labels stacked tightly. Match the unified
+        # 6pt body font; users wanting denser packing can tune row_label_max_chars.
         for y_center, row_label in per_row_label_positions:
             ax.text(
                 -aln_len * 0.005,
                 y_center,
                 row_label,
-                fontsize=4,
+                fontsize=6,
                 ha="right",
                 va="center",
                 color="#424242",
@@ -752,7 +761,7 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                 col_idx + 0.5,
                 extra_y + 0.05,
                 label,
-                fontsize=3.5,
+                fontsize=4,
                 ha="right",
                 va="top",
                 rotation=45,
@@ -761,8 +770,13 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
             )
 
     # -- Layer 7: Legend -------------------------------------------------------
+    # Stats summary is drawn on EVERY panel so multi-panel compositions
+    # aren't missing per-panel metadata on the upper panels. Color
+    # swatches remain gated by ``show_footer`` so they only appear once
+    # in a stacked figure (typically the bottom panel).
+    legend_y = y_axis_pos + 2.4
+
     if show_footer:
-        legend_y = y_axis_pos + 1.8
         legend_items = [
             ("Match", MATCH_COLOR),
             ("Substitution", MISMATCH_COLOR),
@@ -798,19 +812,19 @@ def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
                 color="#424242",
             )
 
-        # Stats summary on the right side of the legend
-        sample_word = "sample" if n_groups == 1 else "samples"
-        stats = (
-            f"{total_seqs} sequences, "
-            f"{n_groups} {sample_word}, "
-            f"{aln_len} positions, {panel.seq_type}"
-        )
-        ax.text(
-            aln_len * 1.0,
-            legend_y + 0.2,
-            stats,
-            fontsize=5,
-            ha="right",
-            va="center",
-            color="#757575",
-        )
+    # Stats summary — always shown, even when color swatches are suppressed.
+    sample_word = "sample" if n_groups == 1 else "samples"
+    stats = (
+        f"{total_seqs} sequences, "
+        f"{n_groups} {sample_word}, "
+        f"{aln_len} positions, {panel.seq_type}"
+    )
+    ax.text(
+        aln_len * 1.0,
+        legend_y + 0.2,
+        stats,
+        fontsize=5,
+        ha="right",
+        va="center",
+        color="#757575",
+    )

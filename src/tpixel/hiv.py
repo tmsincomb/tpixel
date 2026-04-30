@@ -9,8 +9,19 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
+from tpixel.anchors import (
+    KNOWN_ANCHOR_LINEAGES,
+    build_anchor_hxb2_map,
+    detect_anchor_lineage,
+)
 from tpixel.fasta import read_fasta
-from tpixel.hxb2 import _is_nucleotide, build_hxb2_map, hxb2_col_labels, hxb2_regions
+from tpixel.hxb2 import (
+    _is_nucleotide,
+    build_hxb2_map,
+    hxb2_col_labels,
+    hxb2_regions,
+    hxb2_variant_labels,
+)
 from tpixel.models import Marker, Panel, Region, RowLabelMode, SeqGroup
 from tpixel.pngs import find_pngs_markers, find_pngs_markers_nt
 
@@ -203,6 +214,10 @@ def hiv_panel(
     nt_ruler_step: int = 250,
     row_label_mode: RowLabelMode = "group_rollup",
     row_label_max_chars: int = 30,
+    show_variant_labels: bool = False,
+    show_markers: bool = True,
+    anchor_id: str | None = None,
+    anchor_lineage: str | None = None,
 ) -> Panel:
     """Build a full Roark-style Panel from an HIV Env alignment.
 
@@ -243,6 +258,25 @@ def hiv_panel(
         row_label_max_chars: Truncation length for per-row labels.
             Default ``30`` — enough to distinguish typical SHIV/HIV SGS
             identifiers while keeping the left margin compact.
+        show_variant_labels: When ``True``, populate
+            ``panel.extra_col_labels`` with ``"wildtype+pos+mutation"``
+            strings (e.g. ``"K169E"``) for every column where the primary
+            lineage ``_ref`` differs from HxB2. Renderer draws them as a
+            red tick row below the main x-axis. Position numbering
+            follows ``seq_type``: AA positions for amino-acid alignments,
+            NT positions for nucleotide alignments.
+        show_markers: When ``True`` (default), draw PNGS (N-linked
+            glycosylation site) markers as green dots above the reference
+            row. Set to ``False`` to suppress all marker annotations.
+            Named generically to allow future non-PNGS marker types.
+        anchor_id: Sequence ID to use as the header coordinate anchor when
+            HxB2 is missing from the alignment. Defaults to the primary
+            ``_ref`` row resolved via ``ref_id``/``ref_positions``. Ignored
+            when HxB2 is present.
+        anchor_lineage: Anchor lineage (one of
+            :data:`tpixel.anchors.KNOWN_ANCHOR_LINEAGES`). Auto-detected
+            from ``anchor_id`` prefix when ``None``. Ignored when HxB2 is
+            present.
 
     Returns:
         Panel with regions, PNGS markers, grouped sequences, and HxB2 ticks.
@@ -276,7 +310,40 @@ def hiv_panel(
     if seq_type is None:
         seq_type = "NT" if _is_nucleotide(ref_seq) else "AA"
 
-    hxb2_map = build_hxb2_map(seqs, hxb2_id, seq_type=seq_type)
+    hxb2_present = any(
+        n == hxb2_id or n.split()[0] == hxb2_id for n, _ in seqs
+    )
+    if hxb2_present:
+        hxb2_map = build_hxb2_map(seqs, hxb2_id, seq_type=seq_type)
+    else:
+        resolved_anchor_id = anchor_id or ref_id
+        resolved_lineage = anchor_lineage or (
+            detect_anchor_lineage(resolved_anchor_id) if resolved_anchor_id else None
+        )
+        if resolved_anchor_id is None or resolved_lineage is None:
+            ref_rows = [n for n in names if n.endswith("_ref")]
+            anchor_hint = next(
+                (
+                    f"--ref-pos {names.index(n) + 1}"
+                    for n in ref_rows
+                    if detect_anchor_lineage(n) is not None
+                ),
+                None,
+            )
+            hint = (
+                f" Try `{anchor_hint} --anchor-lineage {detect_anchor_lineage(ref_rows[0])}`"
+                if anchor_hint and ref_rows and detect_anchor_lineage(ref_rows[0])
+                else ""
+            )
+            raise ValueError(
+                f"HxB2 sequence '{hxb2_id}' not in alignment and could not "
+                f"resolve an anchor lineage from anchor_id={resolved_anchor_id!r}. "
+                f"Pass anchor_lineage explicitly or point ref-pos at a known "
+                f"lineage _ref row. Known: {KNOWN_ANCHOR_LINEAGES}.{hint}"
+            )
+        hxb2_map = build_anchor_hxb2_map(
+            seqs, resolved_anchor_id, resolved_lineage, seq_type=seq_type
+        )
     regions = hxb2_regions(hxb2_map)
 
     # Apply region palette override (and merge same-color adjacent regions).
@@ -297,7 +364,9 @@ def hiv_panel(
         nt_ruler_labels = None
         col_labels = hxb2_col_labels(hxb2_map, step=tick_step)
 
-    if seq_type == "NT":
+    if not show_markers:
+        markers = []
+    elif seq_type == "NT":
         markers = find_pngs_markers_nt(ref_seq, hxb2_map)
     else:
         markers = find_pngs_markers(ref_seq, hxb2_map)
@@ -344,6 +413,20 @@ def hiv_panel(
             )
         secondary_ref_row = list(sec_seq.upper())
 
+    extra_col_labels: list[tuple[int, str]] | None = None
+    if show_variant_labels:
+        hxb2_seq = seq_dict.get(hxb2_id)
+        if hxb2_seq is not None:
+            hxb2_row = list(hxb2_seq.upper()[:aln_len])
+            hxb2_row += ["-"] * (aln_len - len(hxb2_row))
+        else:
+            # No HxB2 row in alignment — synthesize from the anchor map's
+            # per-column HxB2 residues so K169E-style labels still work.
+            hxb2_row = [p.hxb2_residue for p in hxb2_map]
+        extra_col_labels = hxb2_variant_labels(
+            hxb2_row, ref_row, hxb2_map, seq_type=seq_type
+        )
+
     return Panel(
         label=ref_id,
         ref_row=ref_row,
@@ -357,6 +440,7 @@ def hiv_panel(
         extra_ref_rows=extra_ref_rows,
         secondary_ref_row=secondary_ref_row,
         nt_ruler_labels=nt_ruler_labels,
+        extra_col_labels=extra_col_labels,
         row_label_mode=row_label_mode,
         row_label_max_chars=row_label_max_chars,
     )
