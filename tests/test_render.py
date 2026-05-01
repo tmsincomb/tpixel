@@ -598,3 +598,95 @@ class TestNTRendering:
         path = write_fasta(seqs, "forced_nt.fasta")
         panel = hiv_panel(str(path), seq_type="NT")
         assert panel.seq_type == "NT"
+
+
+class TestHeterologousColoring:
+    """Three-way comparison: match, pure mismatch, heterologous (matches secondary ref)."""
+
+    def _panel(self, ref: str, secondary: str | None, rows: list[tuple[str, str]]) -> Panel:
+        return Panel(
+            label="primary",
+            ref_row=list(ref),
+            seq_rows=[(name, list(bases)) for name, bases in rows],
+            total_cols=len(ref),
+            col_labels=[],
+            secondary_ref_row=list(secondary) if secondary is not None else None,
+        )
+
+    def test_no_secondary_ref_falls_back_to_mismatch(self, output_dir):
+        panel = self._panel("ACGTACGT", None, [("s1", "ATCTACGT")])
+        out = output_dir / "no_secondary.png"
+        render_panels([panel], str(out), dpi=150)
+        assert out.exists()
+        assert panel.secondary_ref_row is None
+
+    def test_heterologous_color_default(self):
+        panel = self._panel("AAAA", "TTTT", [("s1", "TTTT")])
+        assert panel.heterologous_color == "#FF6F00"
+        assert panel.heterologous_color != "#D32F2F"
+
+    def test_three_way_classification(self, output_dir):
+        panel = self._panel(
+            ref="AAAA",
+            secondary="TGCT",
+            rows=[
+                ("heterologous_at_123", "AGCT"),
+                ("pure_mismatch_at_1", "ACAA"),
+            ],
+        )
+        out = output_dir / "three_way_coloring.png"
+        render_panels([panel], str(out), dpi=150)
+        assert out.exists()
+
+    def test_secondary_ref_shorter_than_primary(self, output_dir):
+        # If secondary_ref_row is shorter than ref_row, the renderer must
+        # not index out of bounds. Falls back to MISMATCH for cols beyond.
+        panel = self._panel("AAAAAAAA", "GGGG", [("s1", "GGGGCCCC")])
+        out = output_dir / "secondary_short.png"
+        render_panels([panel], str(out), dpi=150)
+        assert out.exists()
+
+    def test_legend_includes_heterologous(self, output_dir):
+        panel = self._panel("AAAA", "GGGG", [("s1", "GGAA")])
+        out = output_dir / "legend_with_heterologous.png"
+        render_panels([panel], str(out), dpi=150)
+        assert out.exists()
+
+    def test_hiv_panel_with_secondary_ref(self, write_fasta, output_dir):
+        # End-to-end: hiv_panel loads a secondary ref FASTA aligned to the
+        # panel's coordinate space and renders correctly.
+        from tpixel.hiv import hiv_panel
+
+        hxb2_aa = "MWLKFHRD" * 5
+        ref_aa = "MWLKFHRD" * 5
+        sec_aa = "MWLKFHRE" * 5  # differs from primary at every 8th pos
+        s1_aa = "MWLKFHRE" * 5  # matches secondary at the diverging positions
+
+        main_path = write_fasta(
+            [("HxB2", hxb2_aa), ("animal1_ref", ref_aa), ("animal1_s1", s1_aa)],
+            "main.fasta",
+        )
+        sec_path = write_fasta([("animal2_ref", sec_aa)], "secondary.fasta")
+
+        panel = hiv_panel(str(main_path), secondary_ref_path=str(sec_path))
+        assert panel.secondary_ref_row is not None
+        assert len(panel.secondary_ref_row) == panel.total_cols
+
+        out = output_dir / "hiv_with_secondary.png"
+        render_panels([panel], str(out), dpi=150)
+        assert out.exists()
+
+    def test_hiv_panel_secondary_ref_length_mismatch_raises(self, write_fasta):
+        # The secondary ref must already be aligned to the panel's columns;
+        # if its length differs, hiv_panel must reject it with a clear error.
+        from tpixel.hiv import hiv_panel
+
+        main = write_fasta(
+            [("HxB2", "ACGTACGT"), ("animal1_ref", "ACGTACGT"), ("animal1_s1", "ACGTACGT")],
+            "main.fasta",
+        )
+        sec = write_fasta([("other_ref", "ACGT")], "wrong_length.fasta")  # too short
+
+        import pytest
+        with pytest.raises(ValueError, match="Secondary ref length"):
+            hiv_panel(str(main), secondary_ref_path=str(sec))

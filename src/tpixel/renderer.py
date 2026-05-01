@@ -24,6 +24,75 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from tpixel.models import Panel
 
+
+def compute_row_labels(panel: Panel) -> list[str]:
+    """Return left-margin row labels in top-to-bottom render order.
+
+    The returned list enumerates labels for every row the renderer draws
+    a text label for:
+
+    1. ``panel.extra_ref_rows`` (e.g. HxB2) — rendered ABOVE the primary
+       reference, unnumbered, using each tuple's first element.
+    2. The primary reference row — labelled ``panel.label`` (e.g.
+       ``"<lineage>_ref"``), unnumbered.
+    3. Data rows from ``panel.effective_groups`` — labelled according to
+       ``panel.row_label_mode``:
+
+       - ``"group_rollup"`` produces one label per group
+         (``"{name} ({count})"``).  Groups with an empty name emit no
+         label, matching the existing renderer behaviour.
+       - ``"per_row_numbered"`` produces one label per sequence,
+         ``"{N}. {short_seqid}"``, with ``N`` starting at 1 and
+         monotonically incrementing across groups.
+       - ``"raw_seqid"`` produces one label per sequence, just
+         ``short_seqid``.
+
+    ``short_seqid`` is the sequence ID truncated to
+    ``panel.row_label_max_chars`` characters.
+
+    This helper mirrors (but does not execute) the label-placement logic
+    in :func:`_draw_panel` so tests can assert label content without
+    inspecting matplotlib ``Text`` objects.
+
+    Examples:
+        >>> from tpixel.models import Panel, SeqGroup
+        >>> p = Panel(
+        ...     label="LIN_ref",
+        ...     ref_row=list("A"),
+        ...     seq_rows=[],
+        ...     total_cols=1,
+        ...     col_labels=[],
+        ...     extra_ref_rows=[("HxB2", list("A"))],
+        ...     groups=[SeqGroup("g", [("s1", list("A")), ("s2", list("A"))])],
+        ...     row_label_mode="per_row_numbered",
+        ... )
+        >>> compute_row_labels(p)
+        ['HxB2', 'LIN_ref', '1. s1', '2. s2']
+    """
+    labels: list[str] = []
+    if panel.extra_ref_rows:
+        for eref_label, _bases in panel.extra_ref_rows:
+            labels.append(eref_label)
+    labels.append(panel.label)
+
+    mode = panel.row_label_mode
+    max_chars = panel.row_label_max_chars
+    n = 1
+    for group in panel.effective_groups:
+        if mode == "group_rollup":
+            if group.name:
+                labels.append(f"{group.name} ({len(group.seqs)})")
+        elif mode == "per_row_numbered":
+            for seq_id, _bases in group.seqs:
+                labels.append(f"{n}. {seq_id[:max_chars]}")
+                n += 1
+        elif mode == "raw_seqid":
+            for seq_id, _bases in group.seqs:
+                labels.append(seq_id[:max_chars])
+        else:  # pragma: no cover — Literal type prevents unknown values
+            raise ValueError(f"Unknown row_label_mode: {mode!r}")
+    return labels
+
 # -- Roark 3-color scheme --------------------------------------------------
 MATCH_COLOR = "#BDBDBD"
 MISMATCH_COLOR = "#D32F2F"
@@ -39,6 +108,55 @@ REF_ROW_HEIGHT = 0.5
 REF_SEQ_PAD = 0.3
 SEQ_DATA_ROW = 0.35
 GROUP_DATA_GAP = 1.0
+# NT ruler (top header track) — drawn ABOVE the region color bar and the
+# marker zone when `panel.nt_ruler_labels` is set. Height leaves room for
+# a row of numeric labels and a tick-mark band that points at the region
+# bar directly below.
+NT_RULER_ZONE_HEIGHT = 1.4
+NT_RULER_PAD = 0.2
+
+
+def _data_height(panel: Panel, *, show_footer: bool = True) -> float:
+    """Compute total data-coordinate height matching ``_draw_panel`` layout.
+
+    This mirrors the y-coordinate system in :func:`_draw_panel` so that
+    callers can derive a consistent inches-per-data-unit scale.
+
+    Args:
+        panel: Panel to measure.
+        show_footer: Whether the legend row is included.  When ``False``
+            only the x-axis ticks are counted, saving ~1.2 data units.
+    """
+    has_regions = bool(panel.regions)
+    has_markers = bool(panel.markers)
+    has_title = bool(panel.title)
+    has_nt_ruler = bool(panel.nt_ruler_labels)
+    n_extra_refs = len(panel.extra_ref_rows) if panel.extra_ref_rows else 0
+    total_seqs = panel.total_seqs
+    n_groups = len(panel.effective_groups)
+
+    y = 0.0
+    if has_nt_ruler:
+        y += NT_RULER_ZONE_HEIGHT + NT_RULER_PAD
+    if has_markers:
+        y += MARKER_ZONE_HEIGHT + HEADER_MARKER_PAD
+    if has_regions:
+        y += REGION_HEADER_HEIGHT
+    y += MARKER_REF_PAD if (has_markers or has_regions) else 0.2
+    if n_extra_refs:
+        y += n_extra_refs * REF_ROW_HEIGHT + REF_SEQ_PAD
+    y += REF_ROW_HEIGHT + REF_SEQ_PAD  # primary ref
+
+    seq_data_total = total_seqs * SEQ_DATA_ROW + max(0, n_groups - 1) * GROUP_DATA_GAP
+    # 0.5 gap before axis; 3.0 for legend (clearance from rotated x-tick
+    # labels) or 0.8 for axis labels only
+    y += seq_data_total + 0.5 + (3.0 if show_footer else 0.8)
+
+    # Account for title headroom in ylim
+    if has_title:
+        y += 0.4
+
+    return y
 
 
 def panel_figsize(panel: Panel) -> tuple[float, float]:
@@ -53,6 +171,7 @@ def panel_figsize(panel: Panel) -> tuple[float, float]:
     aln_len = panel.total_cols
     total_seqs = panel.total_seqs
     n_groups = len(panel.effective_groups)
+    n_extra_refs = len(panel.extra_ref_rows) if panel.extra_ref_rows else 0
 
     has_regions = bool(panel.regions)
     has_markers = bool(panel.markers)
@@ -63,7 +182,7 @@ def panel_figsize(panel: Panel) -> tuple[float, float]:
     title_h = 0.5 if has_title else 0.0
     region_h = 0.4 if has_regions else 0.0
     marker_h = 0.6 if has_markers else 0.0
-    ref_h = 0.15
+    ref_h = 0.15 * (1 + n_extra_refs)
     axis_h = 0.5
     legend_h = 0.4
 
@@ -102,13 +221,22 @@ def plot_panel(panel: Panel, ax: Axes | None = None) -> Axes:
     return ax
 
 
-def to_patchwork(panel: Panel, label: str = "tpixel") -> "pw.Brick":
+def to_patchwork(
+    panel: Panel,
+    label: str = "tpixel",
+    figsize: tuple[float, float] | None = None,
+    show_footer: bool = True,
+) -> "pw.Brick":
     """Create a patchworklib Brick containing the rendered panel.
 
     Args:
         panel: Panel object to render.
         label: Unique label for the Brick (must differ between Bricks
             when composing with ``|`` or ``/``).
+        figsize: Override ``(width, height)`` in inches.  When ``None``,
+            uses :func:`panel_figsize`.
+        show_footer: Draw the legend row.  Set ``False`` on stacked panels
+            to show the legend only once on the last panel.
 
     Returns:
         A ``patchworklib.Brick`` ready for composition.
@@ -116,9 +244,10 @@ def to_patchwork(panel: Panel, label: str = "tpixel") -> "pw.Brick":
     matplotlib.use("Agg")
     import patchworklib as pw
 
-    w, h = panel_figsize(panel)
-    brick = pw.Brick(figsize=(w, h), label=label)
-    _draw_panel(panel, brick)
+    if figsize is None:
+        figsize = panel_figsize(panel)
+    brick = pw.Brick(figsize=figsize, label=label)
+    _draw_panel(panel, brick, show_footer=show_footer)
     return brick
 
 
@@ -134,6 +263,9 @@ def render_panels(
     markers, and grouped sequences. Falls back to a simpler view
     for basic panels with only ref_row + seq_rows.
 
+    When multiple panels are provided they are vertically stacked using
+    patchworklib so proportions are preserved automatically.
+
     Args:
         panels: List of Panel objects to render vertically.
         out_path: Output image path (format inferred from extension).
@@ -142,16 +274,59 @@ def render_panels(
     """
     out_path = Path(out_path)
 
-    for panel in panels:
-        _render_single_panel(panel, out_path, dpi)
-
-    if len(panels) > 1:
-        print(f"Saved: {out_path} ({dpi} dpi, {len(panels)} panel(s))")
-    else:
+    if len(panels) == 1:
+        _render_single_panel(panels[0], out_path, dpi)
         print(
             f"Saved: {out_path} ({dpi} dpi, {panels[0].total_cols} cols, "
             f"{panels[0].total_seqs} seqs)"
         )
+        return
+
+    # Multiple panels: stack vertically with patchworklib.
+    # Only the last panel gets the legend; earlier panels omit it.
+    # Derive a shared inches-per-data-unit scale from the tallest panel
+    # so chrome (regions, markers, ref rows) renders at identical physical
+    # size across all panels regardless of sequence count.
+    import uuid
+
+    import patchworklib as pw
+
+    pw.param["margin"] = 0
+
+    # patchworklib enforces globally-unique Brick labels via a module-level
+    # _labelset, so reusing "panel_0"/"panel_1" across multiple
+    # render_panels calls (e.g. across pytest cases in one process)
+    # raises ValueError. Suffix every label with a fresh uuid to keep the
+    # labels stable within one call but unique across calls.
+    call_id = uuid.uuid4().hex[:8]
+
+    last = len(panels) - 1
+    data_heights = [
+        _data_height(p, show_footer=(i == last))
+        for i, p in enumerate(panels)
+    ]
+    # Scale from the tallest panel's default figsize
+    max_idx = max(range(len(panels)), key=lambda i: data_heights[i])
+    ref_w, ref_h = panel_figsize(panels[max_idx])
+    shared_scale = ref_h / _data_height(panels[max_idx])
+
+    bricks = [
+        to_patchwork(
+            panel,
+            label=f"panel_{i}_{call_id}",
+            figsize=(ref_w, data_heights[i] * shared_scale),
+            show_footer=(i == last),
+        )
+        for i, panel in enumerate(panels)
+    ]
+    composed = bricks[0]
+    for brick in bricks[1:]:
+        composed = composed / brick
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    composed.savefig(str(out_path), dpi=dpi)
+    plt.close("all")
+    print(f"Saved: {out_path} ({dpi} dpi, {len(panels)} panel(s))")
 
 
 def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
@@ -177,7 +352,7 @@ def _render_single_panel(panel: Panel, out_path: Path, dpi: int) -> None:
     plt.close(fig)
 
 
-def _draw_panel(panel: Panel, ax: Axes) -> None:
+def _draw_panel(panel: Panel, ax: Axes, *, show_footer: bool = True) -> None:
     """Draw all 7 layers of a Roark-style panel onto *ax*."""
     aln_len = panel.total_cols
     groups = panel.effective_groups
@@ -187,9 +362,22 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
     has_regions = bool(panel.regions)
     has_markers = bool(panel.markers)
     has_title = bool(panel.title)
+    has_nt_ruler = bool(panel.nt_ruler_labels)
 
     # -- Y coordinate system (data units, top=0 downward) --------------------
     y_cursor = 0.0
+
+    # NT ruler zone (TOP: numeric tick labels + tick marks above everything
+    # else — explicitly positioned ABOVE the region color band per
+    # scrutiny-m2 blocker #2). Drawn only when `panel.nt_ruler_labels` is
+    # populated; otherwise the panel falls back to AA tick marks at the
+    # bottom via `panel.col_labels` + Layer 6.
+    if has_nt_ruler:
+        y_ruler_top = y_cursor
+        y_ruler_bot = y_cursor + NT_RULER_ZONE_HEIGHT
+        y_cursor = y_ruler_bot + NT_RULER_PAD
+    else:
+        y_ruler_top = y_ruler_bot = y_cursor
 
     # Marker zone (ABOVE region header so labels are readable)
     if has_markers:
@@ -226,7 +414,7 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
     )
 
     y_axis_pos = y_seq_start + seq_data_total + 0.5
-    y_max = y_axis_pos + 2.0
+    y_max = y_axis_pos + (3.0 if show_footer else 0.8)
 
     ax.set_xlim(-aln_len * 0.08, aln_len * 1.02)
     ax.set_ylim(y_max, -0.5 if has_title else -0.1)
@@ -238,12 +426,54 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
             aln_len / 2,
             -0.3,
             panel.title,
-            fontsize=8,
+            fontsize=6,
             ha="center",
             va="bottom",
             fontweight="bold",
             color="#212121",
         )
+
+    # -- Layer 0: NT ruler (TOP header track, drawn above region bar) --------
+    # Numerical labels at the top of the zone, tick marks at the bottom of
+    # the zone (pointing at the region bar directly below). A thin
+    # horizontal baseline demarcates the ruler from the region header so
+    # the two tracks read as distinct rows.
+    if has_nt_ruler:
+        ruler_baseline_y = y_ruler_bot
+        tick_top = ruler_baseline_y - 0.35
+        tick_bot = ruler_baseline_y
+        numeral_y = tick_top - 0.05  # text baseline just above ticks
+
+        # Baseline line across the panel at the bottom of the ruler zone.
+        ax.plot(
+            [0, aln_len],
+            [ruler_baseline_y, ruler_baseline_y],
+            color="#424242",
+            linewidth=0.4,
+            zorder=2,
+        )
+
+        for col_idx, label in panel.nt_ruler_labels or []:
+            x = col_idx + 0.5
+            # Tick mark.
+            ax.plot(
+                [x, x],
+                [tick_top, tick_bot],
+                color="#424242",
+                linewidth=0.6,
+                zorder=3,
+            )
+            # Numeric label ABOVE the tick marks, ABOVE the region bar.
+            ax.text(
+                x,
+                numeral_y,
+                label,
+                fontsize=4,
+                ha="center",
+                va="bottom",
+                color="#212121",
+                zorder=3,
+            )
 
     # -- Layer 2: Region header -----------------------------------------------
     if has_regions:
@@ -264,7 +494,7 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
                     region.start + width / 2,
                     (y_region_top + y_region_bot) / 2,
                     region.name,
-                    fontsize=5,
+                    fontsize=6,
                     ha="center",
                     va="center",
                     fontweight="bold",
@@ -310,7 +540,7 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
                 col + 0.5,
                 y_text,
                 marker.label,
-                fontsize=2.5,
+                fontsize=4,
                 ha="center",
                 va=va,
                 rotation=0,
@@ -349,7 +579,7 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
                 -aln_len * 0.005,
                 (y_eref + eref_bot) / 2,
                 eref_label,
-                fontsize=5,
+                fontsize=6,
                 ha="right",
                 va="center",
                 fontweight="bold",
@@ -383,7 +613,7 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
         -aln_len * 0.005,
         (y_ref_top + y_ref_bot) / 2,
         panel.label,
-        fontsize=5,
+        fontsize=6,
         ha="right",
         va="center",
         fontweight="bold",
@@ -391,14 +621,22 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
     )
 
     # -- Layer 5: Sequence group blocks ----------------------------------------
+    mode = panel.row_label_mode
+    max_chars = panel.row_label_max_chars
+
     y_cursor = y_seq_start
+    # Group-rollup labels: (y_center, group_name, seq_count).
     label_positions: list[tuple[float, str, int]] = []
+    # Per-row labels (per_row_numbered / raw_seqid): (y_center, label_str).
+    per_row_label_positions: list[tuple[float, str]] = []
+    row_counter = 1
 
     for group_idx, group in enumerate(groups):
         group_y_start = y_cursor
 
-        for _seq_id, row in group.seqs:
+        for seq_id, row in group.seqs:
             row_y = y_cursor
+            row_center = row_y + SEQ_DATA_ROW * 0.85 / 2
 
             # Grey background for entire row
             ax.add_patch(
@@ -412,6 +650,7 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
             )
 
             # Overdraw mutations and gaps
+            sec_ref = panel.secondary_ref_row
             for i, base in enumerate(row):
                 if base == " ":
                     continue
@@ -420,6 +659,8 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
                     color = GAP_COLOR
                 elif base == ref_base:
                     continue
+                elif sec_ref is not None and i < len(sec_ref) and base == sec_ref[i]:
+                    color = panel.heterologous_color
                 else:
                     color = MISMATCH_COLOR
                 ax.add_patch(
@@ -432,6 +673,17 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
                     )
                 )
 
+            # Collect per-row label positions for non-group-rollup modes.
+            if mode == "per_row_numbered":
+                per_row_label_positions.append(
+                    (row_center, f"{row_counter}. {seq_id[:max_chars]}")
+                )
+                row_counter += 1
+            elif mode == "raw_seqid":
+                per_row_label_positions.append(
+                    (row_center, seq_id[:max_chars])
+                )
+
             y_cursor += SEQ_DATA_ROW
 
         group_y_center = (group_y_start + y_cursor) / 2
@@ -441,20 +693,40 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
         if group_idx < n_groups - 1:
             y_cursor += GROUP_DATA_GAP
 
-    for y_center, name, count in label_positions:
-        label = f"{name} ({count})"
-        ax.text(
-            -aln_len * 0.005,
-            y_center,
-            label,
-            fontsize=4,
-            ha="right",
-            va="center",
-            color="#424242",
-        )
+    if mode == "group_rollup":
+        for y_center, name, count in label_positions:
+            label = f"{name} ({count})"
+            ax.text(
+                -aln_len * 0.005,
+                y_center,
+                label,
+                fontsize=6,
+                ha="right",
+                va="center",
+                color="#424242",
+            )
+    else:
+        # Per-row labels: many labels stacked tightly. Match the unified
+        # 6pt body font; users wanting denser packing can tune row_label_max_chars.
+        for y_center, row_label in per_row_label_positions:
+            ax.text(
+                -aln_len * 0.005,
+                y_center,
+                row_label,
+                fontsize=6,
+                ha="right",
+                va="center",
+                color="#424242",
+            )
 
     # -- Layer 6: X-axis ticks -------------------------------------------------
-    for col_idx, label in panel.col_labels:
+    # When the NT ruler is drawn as a dedicated top header track
+    # (`panel.nt_ruler_labels`), suppress the bottom tick row that would
+    # otherwise duplicate the same numeric labels underneath the sequence
+    # block. The feature contract requires the ruler ABOVE the region bar,
+    # NOT as bottom x-axis ticks.
+    col_label_iter = [] if has_nt_ruler else panel.col_labels
+    for col_idx, label in col_label_iter:
         ax.plot(
             [col_idx + 0.5, col_idx + 0.5],
             [y_axis_pos - 0.2, y_axis_pos + 0.1],
@@ -466,50 +738,85 @@ def _draw_panel(panel: Panel, ax: Axes) -> None:
             y_axis_pos + 0.2,
             label,
             fontsize=4,
-            ha="center",
+            ha="right",
             va="top",
+            rotation=45,
+            rotation_mode="anchor",
             color="#424242",
         )
+
+    # -- Layer 6b: Extra x-axis ticks (second row, e.g. mutation positions) ---
+    if panel.extra_col_labels:
+        extra_y = y_axis_pos + 0.8
+        for col_idx, label in panel.extra_col_labels:
+            ax.plot(
+                [col_idx + 0.5, col_idx + 0.5],
+                [y_axis_pos - 0.2, extra_y],
+                color="#D32F2F",
+                linewidth=0.3,
+                linestyle=":",
+                alpha=0.5,
+            )
+            ax.text(
+                col_idx + 0.5,
+                extra_y + 0.05,
+                label,
+                fontsize=4,
+                ha="right",
+                va="top",
+                rotation=45,
+                rotation_mode="anchor",
+                color="#D32F2F",
+            )
 
     # -- Layer 7: Legend -------------------------------------------------------
-    legend_y = y_axis_pos + 1.2
-    legend_items = [
-        ("Match", MATCH_COLOR),
-        ("Substitution", MISMATCH_COLOR),
-        ("Gap/Indel", GAP_COLOR),
-    ]
-    if has_markers:
-        legend_items.append(("Marker", panel.marker_color))
+    # Stats summary is drawn on EVERY panel so multi-panel compositions
+    # aren't missing per-panel metadata on the upper panels. Color
+    # swatches remain gated by ``show_footer`` so they only appear once
+    # in a stacked figure (typically the bottom panel).
+    legend_y = y_axis_pos + 2.4
 
-    legend_x_start = aln_len * 0.25
-    legend_spacing = aln_len * 0.15
+    if show_footer:
+        legend_items = [
+            ("Match", MATCH_COLOR),
+            ("Substitution", MISMATCH_COLOR),
+            ("Gap/Indel", GAP_COLOR),
+        ]
+        if panel.secondary_ref_row is not None:
+            legend_items.append(("Heterologous", panel.heterologous_color))
+        if has_markers:
+            legend_items.append(("Marker", panel.marker_color))
 
-    for idx, (label, color) in enumerate(legend_items):
-        x = legend_x_start + idx * legend_spacing
-        ax.add_patch(
-            Rectangle(
-                (x, legend_y),
-                aln_len * 0.015,
-                0.4,
-                facecolor=color,
-                edgecolor="#9E9E9E",
-                linewidth=0.3,
+        legend_x_start = aln_len * 0.25
+        legend_spacing = aln_len * 0.15
+
+        for idx, (label, color) in enumerate(legend_items):
+            x = legend_x_start + idx * legend_spacing
+            ax.add_patch(
+                Rectangle(
+                    (x, legend_y),
+                    aln_len * 0.015,
+                    0.4,
+                    facecolor=color,
+                    edgecolor="#9E9E9E",
+                    linewidth=0.3,
+                )
             )
-        )
-        ax.text(
-            x + aln_len * 0.02,
-            legend_y + 0.2,
-            label,
-            fontsize=5,
-            ha="left",
-            va="center",
-            color="#424242",
-        )
+            ax.text(
+                x + aln_len * 0.02,
+                legend_y + 0.2,
+                label,
+                fontsize=5,
+                ha="left",
+                va="center",
+                color="#424242",
+            )
 
-    # Stats summary on the right side of the legend
+    # Stats summary — always shown, even when color swatches are suppressed.
+    sample_word = "sample" if n_groups == 1 else "samples"
     stats = (
         f"{total_seqs} sequences, "
-        f"{n_groups} samples, "
+        f"{n_groups} {sample_word}, "
         f"{aln_len} positions, {panel.seq_type}"
     )
     ax.text(

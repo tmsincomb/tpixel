@@ -152,30 +152,122 @@ def build_hxb2_map(
 
 
 def hxb2_col_labels(hxb2_map: list[HxB2Position], step: int = 50) -> list[tuple[int, str]]:
-    """Build x-axis tick labels at regular HxB2 AA intervals."""
-    max_pos = max((p.hxb2_aa_pos for p in hxb2_map if p.hxb2_aa_pos is not None), default=0)
-    labels: list[tuple[int, str]] = []
+    """Build x-axis tick labels at regular HxB2 AA intervals.
+
+    Always includes the first HxB2-mapped column as a tick so that
+    panels starting at a non-standard AA position (e.g. a windowed
+    alignment that begins mid-sequence) expose their starting
+    coordinate. Duplicates with the step-interval ticks are filtered
+    so a panel whose first AA lands exactly on a multiple of ``step``
+    doesn't render two overlapping tick labels.
+    """
+    mapped = [p for p in hxb2_map if p.hxb2_aa_pos is not None]
+    if not mapped:
+        return []
+    first = mapped[0]
+    max_pos = mapped[-1].hxb2_aa_pos
+    labels: list[tuple[int, str]] = [(first.alignment_col, str(first.hxb2_aa_pos))]
     for target in range(step, max_pos + 1, step):
-        for p in hxb2_map:
+        for p in mapped:
             if p.hxb2_aa_pos == target:
-                labels.append((p.alignment_col, str(target)))
+                if p.alignment_col != labels[0][0]:
+                    labels.append((p.alignment_col, str(target)))
                 break
     return labels
 
 
+def hxb2_variant_labels(
+    hxb2_row: list[str],
+    query_row: list[str],
+    hxb2_map: list[HxB2Position],
+    *,
+    seq_type: str = "AA",
+) -> list[tuple[int, str]]:
+    """Return (column_index, ``"wildtype+pos+mutation"``) labels for every
+    column where *query_row* differs from *hxb2_row*.
+
+    Label format follows the standard mutation shorthand:
+
+    * Substitution → ``"K169E"`` (HxB2 residue + HxB2 position + query residue).
+    * Deletion (query gap) → ``"K169-"``.
+    * Insertion relative to HxB2 (HxB2 gap) → skipped (those columns have
+      no stable HxB2 position to print).
+    * Matching positions → skipped.
+
+    For AA alignments the position is the 1-based HxB2 amino-acid position
+    (e.g. ``169``). For NT alignments it is the 1-based HxB2 nucleotide
+    position (e.g. ``507``).
+
+    Args:
+        hxb2_row: Aligned HxB2 row (single-character strings).
+        query_row: Aligned query row to compare against HxB2 (same length).
+        hxb2_map: Output of :func:`build_hxb2_map` (one entry per column).
+        seq_type: ``"AA"`` or ``"NT"``. Controls whether positions are
+            reported in amino-acid or nucleotide coordinates.
+
+    Returns:
+        Ordered list of ``(col_idx, label)`` pairs, one per variant column.
+
+    Examples:
+        >>> from tpixel.hxb2 import build_hxb2_map, hxb2_variant_labels
+        >>> seqs = [("HxB2", "MKRVK"), ("lin_ref", "MKEVK")]
+        >>> m = build_hxb2_map(seqs, hxb2_id="HxB2", seq_type="AA")
+        >>> hxb2_variant_labels(list("MKRVK"), list("MKEVK"), m, seq_type="AA")
+        [(2, 'R3E')]
+    """
+    GAPS = {"-", ".", " "}
+    is_nt = seq_type == "NT"
+
+    out: list[tuple[int, str]] = []
+    nt_counter = 0
+    for i, p in enumerate(hxb2_map):
+        hxb2_res = hxb2_row[i] if i < len(hxb2_row) else "-"
+        query_res = query_row[i] if i < len(query_row) else "-"
+
+        if hxb2_res in GAPS:
+            continue
+
+        if is_nt:
+            nt_counter += 1
+            pos_label = str(nt_counter)
+        else:
+            if p.hxb2_aa_pos is None:
+                continue
+            pos_label = str(p.hxb2_aa_pos)
+
+        if query_res == hxb2_res:
+            continue
+
+        mut = "-" if query_res in GAPS else query_res.upper()
+        out.append((i, f"{hxb2_res.upper()}{pos_label}{mut}"))
+
+    return out
+
+
 def hxb2_regions(hxb2_map: list[HxB2Position]) -> list[Region]:
-    """Build Region annotations from HxB2 position map."""
+    """Build Region annotations from HxB2 position map.
+
+    Columns whose ``region`` is ``None`` (HxB2 row gap, or lineage
+    insertion vs HxB2 in anchor mode) extend whichever region they fall
+    within rather than fragmenting the bar — small indels do not break
+    visual continuity. A region ends only when the position map either
+    transitions to a different named region or runs out of columns.
+    """
     region_spans: list[tuple[str, int, int]] = []
     current: str | None = None
     span_start = 0
 
     for p in hxb2_map:
         r = p.region
-        if r != current:
-            if current is not None:
-                region_spans.append((current, span_start, p.alignment_col))
-            current = r
-            span_start = p.alignment_col
+        if r is None:
+            # Stay inside the current span — gap column gets absorbed.
+            continue
+        if r == current:
+            continue
+        if current is not None:
+            region_spans.append((current, span_start, p.alignment_col))
+        current = r
+        span_start = p.alignment_col
 
     if current is not None:
         region_spans.append((current, span_start, len(hxb2_map)))

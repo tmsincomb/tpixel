@@ -45,6 +45,9 @@ tpixel = "tpixel.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+tpixel = ["data/anchor_refs/*.fasta"]
+
 [tool.setuptools_scm]
 version_file = "src/tpixel/_version.py"
 local_scheme = "no-local-version"

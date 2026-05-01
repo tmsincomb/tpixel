@@ -209,5 +209,19 @@ __marimo__/
 # macOS
 .DS_Store
 
+# IDE
+.vscode/
+.cursor/
+.claude/
+.cursorignore
+.cursorindexingignore
+
 # Test output artifacts
 tests/output/
+
+# Local scratch reference fastas (not shipped)
+refs/
+
+# Ad-hoc alignment and image files
+tpixel.skill
+
